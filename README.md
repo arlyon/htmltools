@@ -7,7 +7,7 @@ A Bun runner for HTML-first local tools with embedded server TypeScript, typed b
 HTMLTool currently requires Bun on `PATH` to transpile browser code at tool startup.
 
 ```bash
-mise use -g github:arlyon/htmltools
+mise use -g github:arlyon/htmltools@0.1.0
 htmltool instructions
 ```
 
