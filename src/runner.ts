@@ -27,10 +27,15 @@ export async function runTool(
 	compiled: CompiledTool,
 	options: { hostname: string; port: number },
 ): Promise<RunningTool> {
-	const moduleUrl = `${Bun.pathToFileURL(compiled.serverBundle).href}?v=${Date.now()}`;
-	const serverModule = (await import(moduleUrl)) as {
-		default?: RuntimeDefinition;
-	};
+	const moduleUrl = URL.createObjectURL(compiled.serverBundle);
+	let serverModule: { default?: RuntimeDefinition };
+	try {
+		serverModule = (await import(moduleUrl)) as {
+			default?: RuntimeDefinition;
+		};
+	} finally {
+		URL.revokeObjectURL(moduleUrl);
+	}
 	if (!serverModule.default || typeof serverModule.default !== "object") {
 		throw new Error(
 			"The server block must default-export createServer<Server>(...)",
@@ -61,7 +66,7 @@ export async function runTool(
 				return new Response("WebSocket upgrade required", { status: 426 });
 			}
 			if (url.pathname === "/.htmltool/client.js") {
-				return new Response(Bun.file(compiled.clientBundle), {
+				return new Response(compiled.clientBundle, {
 					headers: { "content-type": "text/javascript; charset=utf-8" },
 				});
 			}
@@ -152,7 +157,7 @@ async function createMcpEndpoint(
 	server: McpServer;
 	transport: WebStandardStreamableHTTPServerTransport;
 }> {
-	const server = new McpServer({ name, version: "0.0.0" });
+	const server = new McpServer({ name, version: "0.1.1" });
 	for (const [toolName, entry] of Object.entries(definition)) {
 		if (entry.kind !== "mcp") continue;
 		server.registerTool(

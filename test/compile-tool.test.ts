@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -74,15 +75,10 @@ document.body.dataset.marker = marker;
 
 		const compiled = await compileTool(toolPath);
 
-		expect(compiled.buildDirectory).toBe(
-			join(directory, ".htmltool", "environment-test"),
-		);
-		expect(await Bun.file(compiled.serverBundle).text()).toContain(
-			"tool-environment",
-		);
-		expect(await Bun.file(compiled.clientBundle).text()).toContain(
-			"tool-environment",
-		);
+		expect(compiled.toolDirectory).toBe(directory);
+		expect(await compiled.serverBundle.text()).toContain("tool-environment");
+		expect(await compiled.clientBundle.text()).toContain("tool-environment");
+		expect(existsSync(join(directory, ".htmltool"))).toBe(false);
 	});
 
 	test("reserves TypeScript checking for the explicit check command", async () => {
@@ -109,5 +105,6 @@ document.body.dataset.value = String(invalid);
 		await expect(checkTool(toolPath)).rejects.toThrow(
 			"TypeScript check failed",
 		);
+		expect(existsSync(join(directory, ".htmltool"))).toBe(false);
 	});
 });

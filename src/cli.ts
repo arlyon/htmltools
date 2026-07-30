@@ -11,8 +11,30 @@ interface CliOptions {
 	openBrowser: boolean;
 }
 
+const help = `Usage:
+  htmltool <tool.html> [OPTIONS] [-- TOOL_ARGS...]
+  htmltool check <tool.html>
+  htmltool instructions
+
+Commands:
+  check         Type-check common + server and common + client
+  instructions  Print the complete LLM authoring guide
+
+Options:
+  --host HOST   Bind address (default: 127.0.0.1)
+  --port PORT   HTTP port (default: 7331)
+  --no-open     Do not open the browser
+  -h, --help    Show this help`;
+
 async function main(): Promise<void> {
 	const args = Bun.argv.slice(2);
+	if (
+		args.length === 1 &&
+		(args[0] === "help" || args[0] === "-h" || args[0] === "--help")
+	) {
+		process.stdout.write(`${help}\n`);
+		return;
+	}
 	if (
 		args.length === 1 &&
 		(args[0] === "instructions" || args[0] === "--instructions")
@@ -76,9 +98,7 @@ function parseArguments(args: string[]): CliOptions {
 	}
 
 	if (!options.toolPath) {
-		throw new Error(
-			"Usage: htmltool <tool.html> [--host HOST] [--port PORT] [--no-open] [-- TOOL_ARGS...]\n       htmltool check <tool.html>\n       htmltool instructions",
-		);
+		throw new Error(help);
 	}
 	return options;
 }

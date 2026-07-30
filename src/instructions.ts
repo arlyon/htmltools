@@ -95,7 +95,7 @@ Use lang="ts" to mark HTMLTool TypeScript blocks. Give each block exactly one ro
 
 ## Serving and assets
 
-HTMLTool removes common and server blocks before serving the page, bundles the client block, and serves relative assets from the tool directory. Keep reusable CSS in normal files and link them from the HTML.
+HTMLTool removes common and server blocks before serving the page, bundles the server and client blocks in memory, and serves relative assets from the tool directory. Keep reusable CSS in normal files and link them from the HTML.
 
 Routes:
 
@@ -114,5 +114,5 @@ htmltool tool.html -- --tool-specific-option value
 htmltool check tool.html
 ~~~
 
-The browser opens by default. Startup transpiles the browser code but deliberately skips type-checking. Run htmltool check to type-check the actual common + server and common + client programs.
+The browser opens by default. Startup bundles the server and browser code in memory but deliberately skips type-checking. Run htmltool check to type-check the actual common + server and common + client programs.
 `;

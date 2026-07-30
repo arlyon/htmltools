@@ -4,10 +4,8 @@ A Bun runner for HTML-first local tools with embedded server TypeScript, typed b
 
 ## Install
 
-HTMLTool currently requires Bun on `PATH` to transpile browser code at tool startup.
-
 ```bash
-mise use -g github:arlyon/htmltools@0.1.0
+mise use -g github:arlyon/htmltools@0.1.1
 htmltool instructions
 ```
 
@@ -30,7 +28,7 @@ open-loops/
     "start": "htmltool index.html"
   },
   "dependencies": {
-    "htmltool": "github:arlyon/htmltools#v0.1.0",
+    "htmltool": "github:arlyon/htmltools#v0.1.1",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
@@ -46,12 +44,12 @@ bun install
 bun run start
 ```
 
-The runner generates client and server entries beneath the tool directory. Bun and TypeScript therefore resolve bare imports using the tool's nearest `package.json`, `node_modules`, and `tsconfig.json`. Missing packages are reported as normal unresolved imports.
+The runner compiles virtual client and server entries entirely in memory. Their virtual paths sit beneath the tool directory, so Bun and TypeScript resolve bare imports using the nearest `package.json`, `node_modules`, and `tsconfig.json` without writing build artifacts. Missing packages are reported as normal unresolved imports.
 
 The browser opens by default. Pass `--no-open` when running headlessly:
 
 ```bash
-bunx htmltool index.html --no-open
+htmltool index.html --no-open
 ```
 
 ## Source format
@@ -85,7 +83,7 @@ A tool has a small JSON manifest and TypeScript blocks for shared contracts, ser
 </script>
 ```
 
-Run `htmltool check index.html` to type-check the real `common + server` and `common + client` programs. Normal startup skips type-checking and only transpiles the browser bundle. In-editor support uses the editor's existing HTML/TypeScript handling; no language server is bundled with the runner.
+Run `htmltool check index.html` to type-check the real `common + server` and `common + client` programs. Normal startup skips type-checking and bundles both runtime programs in memory. In-editor support uses the editor's existing HTML/TypeScript handling; no language server is bundled with the runner.
 
 Zed needs a project-aware embedded TypeScript patch for imported types and package resolution. See [Zed setup for HTMLTool](docs/zed.md).
 
