@@ -1,0 +1,9 @@
+{
+  "id": "htmltool",
+  "name": "HTMLTool",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Run HTMLTool files in Obsidian panes.",
+  "author": "arlyon",
+  "isDesktopOnly": true
+}

@@ -87,6 +87,13 @@ Run `htmltool check index.html` to type-check the real `common + server` and `co
 
 Zed needs a project-aware embedded TypeScript patch for imported types and package resolution. See [Zed setup for HTMLTool](docs/zed.md).
 
+## Obsidian plugin
+
+The desktop-only [Obsidian integration](integrations/obsidian/README.md)
+opens `.html` files from a vault. HTMLTool files run in an embedded workspace
+pane, while ordinary HTML files receive a safe source preview. Closing the pane
+stops the tool server.
+
 ## Open Loops example
 
 ```bash
