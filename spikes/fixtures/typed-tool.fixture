@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <script type="application/htmltool+json">
+  {
+    "name": "typed-greeting"
+  }
+  </script>
+
+  <script lang="ts" common>
+  interface Server {
+    greet(input: { name: string }): { message: string };
+  }
+  </script>
+
+  <script lang="ts" server>
+  export default createServer<Server>({
+    greet: rpc(async ({ name }) => {
+      return { message: `Hello ${name}` };
+    }),
+  });
+  </script>
+
+  <script lang="ts" client>
+  const client = createClient<Server>();
+  const greeting = await client.greet({ name: "Alex" });
+  document.querySelector("main")!.textContent = greeting.message;
+  </script>
+</head>
+<body>
+  <main>Loading…</main>
+</body>
+</html>

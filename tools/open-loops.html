@@ -1,0 +1,705 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Open Loops</title>
+    <link rel="stylesheet" href="./common.css" />
+    <link rel="stylesheet" href="./open-loops.css" />
+
+    <script type="application/htmltool+json">
+      {
+        "name": "open-loops"
+      }
+    </script>
+
+    <script lang="ts" common>
+      type LoopStatus = "active" | "waiting" | "blocked" | "someday" | "done";
+
+      interface OpenLoop {
+        id: string;
+        title: string;
+        focus: string;
+        nextAction: string | null;
+        waitingOn: string | null;
+        deadline: string | null;
+        priority: number | null;
+        status: LoopStatus;
+        sourcePath: string;
+        sourceUri: string;
+        kind: "note" | "task";
+      }
+
+      interface LoopSnapshot {
+        vault: string;
+        scannedNotes: number;
+        generatedAt: string;
+        loops: OpenLoop[];
+      }
+
+      type LoopStreamEvent =
+        | { type: "started"; vault: string }
+        | { type: "loop"; loop: OpenLoop }
+        | { type: "complete"; scannedNotes: number; generatedAt: string };
+
+      interface Server {
+        listLoops(input: { includeDone?: boolean }): LoopSnapshot;
+        streamLoops(input: {
+          includeDone?: boolean;
+        }): AsyncIterable<LoopStreamEvent>;
+      }
+    </script>
+
+    <script lang="ts" server>
+      import { createServer, mcp, rpc, z } from "htmltool/server";
+      import { readFile, readdir } from "node:fs/promises";
+      import { basename, extname, join, relative, resolve } from "node:path";
+      import process from "node:process";
+      import { parse as parseYaml } from "yaml";
+
+      const loopSchema = z.object({
+        id: z.string(),
+        title: z.string(),
+        focus: z.string(),
+        nextAction: z.string().nullable(),
+        waitingOn: z.string().nullable(),
+        deadline: z.string().nullable(),
+        priority: z.number().nullable(),
+        status: z.enum(["active", "waiting", "blocked", "someday", "done"]),
+        sourcePath: z.string(),
+        sourceUri: z.string(),
+        kind: z.enum(["note", "task"]),
+      });
+
+      export default createServer<Server>({
+        streamLoops: rpc(async function* ({ includeDone = false }) {
+          const vault = configuredVault();
+          if (!vault)
+            throw new Error("Launch with --vault PATH or set HTMLTOOL_VAULT");
+
+          yield { type: "started", vault: basename(vault) };
+          const files = await markdownFiles(vault);
+          for (const path of files) {
+            for (const loop of await loopsFromMarkdown(vault, path)) {
+              if (includeDone || loop.status !== "done") {
+                yield { type: "loop", loop };
+              }
+            }
+          }
+          yield {
+            type: "complete",
+            scannedNotes: files.length,
+            generatedAt: new Date().toISOString(),
+          };
+        }),
+        listLoops: mcp({
+          title: "List open loops",
+          description:
+            "Scan the Obsidian vault and return open commitments and unchecked tasks",
+          input: z.object({ includeDone: z.boolean().optional() }),
+          output: z.object({
+            vault: z.string(),
+            scannedNotes: z.number(),
+            generatedAt: z.string(),
+            loops: z.array(loopSchema),
+          }),
+          run: async ({ includeDone = false }) => {
+            const vault = configuredVault();
+            if (!vault)
+              throw new Error("Launch with --vault PATH or set HTMLTOOL_VAULT");
+
+            const files = await markdownFiles(vault);
+            const loopGroups = await Promise.all(
+              files.map(async (path) => loopsFromMarkdown(vault, path)),
+            );
+            const loops = loopGroups.flat();
+
+            return {
+              vault: basename(vault),
+              scannedNotes: files.length,
+              generatedAt: new Date().toISOString(),
+              loops: loops
+                .filter((loop) => includeDone || loop.status !== "done")
+                .sort(compareLoops),
+            };
+          },
+        }),
+      });
+
+      function configuredVault(): string | undefined {
+        const inline = process.argv.find((argument) =>
+          argument.startsWith("--vault="),
+        );
+        if (inline) return resolve(inline.slice("--vault=".length));
+
+        const optionIndex = process.argv.lastIndexOf("--vault");
+        const value =
+          optionIndex >= 0 ? process.argv[optionIndex + 1] : undefined;
+        return value ? resolve(value) : process.env.HTMLTOOL_VAULT;
+      }
+
+      async function markdownFiles(root: string): Promise<string[]> {
+        const results: string[] = [];
+        const pending = [root];
+        while (pending.length > 0) {
+          const directory = pending.pop()!;
+          for (const entry of await readdir(directory, {
+            withFileTypes: true,
+          })) {
+            if (entry.name.startsWith(".") || entry.name === "node_modules")
+              continue;
+            const path = join(directory, entry.name);
+            if (entry.isDirectory()) pending.push(path);
+            else if (
+              entry.isFile() &&
+              extname(entry.name).toLowerCase() === ".md"
+            ) {
+              results.push(path);
+            }
+          }
+        }
+        return results;
+      }
+
+      async function loopsFromMarkdown(
+        root: string,
+        path: string,
+      ): Promise<OpenLoop[]> {
+        const markdown = await readFile(path, "utf8");
+        const sourcePath = relative(root, path).replaceAll("\\", "/");
+        const { data, body } = frontmatter(markdown);
+        const explicit = isOpenLoop(data, body);
+        const loops: OpenLoop[] = [];
+
+        if (explicit) {
+          loops.push({
+            id: sourcePath,
+            title:
+              text(data.title) ?? firstHeading(body) ?? basename(path, ".md"),
+            focus:
+              text(data.focus) ?? text(data.area) ?? topDirectory(sourcePath),
+            nextAction: field(data, "next-action", "next_action", "next"),
+            waitingOn: field(data, "waiting-on", "waiting_on", "waiting"),
+            deadline: dateField(data.deadline ?? data.due ?? data.event),
+            priority: priorityField(data.priority),
+            status: statusField(
+              data.status,
+              Boolean(field(data, "waiting-on", "waiting_on")),
+            ),
+            sourcePath,
+            sourceUri: obsidianUri(root, sourcePath),
+            kind: "note",
+          });
+        }
+
+        const taskPattern = /^\s*[-*]\s+\[ \]\s+(.+)$/gim;
+        let match: RegExpExecArray | null;
+        let taskIndex = 0;
+        while ((match = taskPattern.exec(body))) {
+          const task = cleanTask(match[1]);
+          loops.push({
+            id: `${sourcePath}#task-${taskIndex++}`,
+            title: task.title,
+            focus: topDirectory(sourcePath),
+            nextAction: task.title,
+            waitingOn: null,
+            deadline: task.deadline,
+            priority: task.priority,
+            status: "active",
+            sourcePath,
+            sourceUri: obsidianUri(root, sourcePath),
+            kind: "task",
+          });
+        }
+
+        return loops;
+      }
+
+      function frontmatter(markdown: string): {
+        data: Record<string, unknown>;
+        body: string;
+      } {
+        if (!markdown.startsWith("---")) return { data: {}, body: markdown };
+        const end = markdown.indexOf("\n---", 3);
+        if (end === -1) return { data: {}, body: markdown };
+        try {
+          const parsed = parseYaml(markdown.slice(3, end));
+          return {
+            data:
+              parsed && typeof parsed === "object"
+                ? (parsed as Record<string, unknown>)
+                : {},
+            body: markdown.slice(end + 4),
+          };
+        } catch {
+          return { data: {}, body: markdown };
+        }
+      }
+
+      function isOpenLoop(
+        data: Record<string, unknown>,
+        body: string,
+      ): boolean {
+        const tags = Array.isArray(data.tags)
+          ? data.tags
+          : (text(data.tags)?.split(/[ ,]+/) ?? []);
+        return (
+          data["open-loop"] === true ||
+          data.open_loop === true ||
+          text(data.type)?.toLowerCase() === "open-loop" ||
+          tags.some(
+            (tag) =>
+              String(tag).replace(/^#/, "").toLowerCase() === "open-loop",
+          ) ||
+          /(^|\s)#open-loop\b/i.test(body)
+        );
+      }
+
+      function firstHeading(body: string): string | null {
+        return body.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? null;
+      }
+
+      function field(
+        data: Record<string, unknown>,
+        ...keys: string[]
+      ): string | null {
+        for (const key of keys) {
+          const value = text(data[key]);
+          if (value) return value;
+        }
+        return null;
+      }
+
+      function text(value: unknown): string | null {
+        if (typeof value === "string" && value.trim()) return value.trim();
+        if (typeof value === "number") return String(value);
+        return null;
+      }
+
+      function dateField(value: unknown): string | null {
+        if (value instanceof Date) return value.toISOString().slice(0, 10);
+        const raw = text(value);
+        if (!raw) return null;
+        const match = raw.match(/\d{4}-\d{2}-\d{2}/);
+        return match?.[0] ?? raw;
+      }
+
+      function priorityField(value: unknown): number | null {
+        if (typeof value === "number" && Number.isFinite(value)) return value;
+        const raw = text(value)?.toLowerCase();
+        if (!raw) return null;
+        if (/^[0-4]$/.test(raw)) return Number(raw);
+        return (
+          {
+            urgent: 0,
+            highest: 0,
+            high: 1,
+            medium: 2,
+            normal: 2,
+            low: 3,
+            lowest: 4,
+          }[raw] ?? null
+        );
+      }
+
+      function statusField(value: unknown, waiting: boolean): LoopStatus {
+        const raw = text(value)?.toLowerCase().replaceAll("_", "-");
+        if (
+          ["done", "closed", "complete", "completed", "cancelled"].includes(
+            raw ?? "",
+          )
+        )
+          return "done";
+        if (["blocked", "stuck"].includes(raw ?? "")) return "blocked";
+        if (
+          ["waiting", "waiting-on", "delegated"].includes(raw ?? "") ||
+          waiting
+        )
+          return "waiting";
+        if (
+          ["someday", "back-burner", "backburner", "paused"].includes(raw ?? "")
+        )
+          return "someday";
+        return "active";
+      }
+
+      function cleanTask(raw: string): {
+        title: string;
+        deadline: string | null;
+        priority: number | null;
+      } {
+        const deadline = raw.match(/📅\s*(\d{4}-\d{2}-\d{2})/)?.[1] ?? null;
+        let priority: number | null = null;
+        if (raw.includes("⏫")) priority = 0;
+        else if (raw.includes("🔼")) priority = 1;
+        else if (raw.includes("🔽")) priority = 3;
+        const title = raw
+          .replace(/📅\s*\d{4}-\d{2}-\d{2}/g, "")
+          .replace(/[⏫🔼🔽]/g, "")
+          .trim();
+        return { title, deadline, priority };
+      }
+
+      function topDirectory(path: string): string {
+        const [first] = path.split("/");
+        return first && first.endsWith(".md")
+          ? "Unsorted"
+          : first || "Unsorted";
+      }
+
+      function obsidianUri(root: string, path: string): string {
+        const vault = encodeURIComponent(basename(root));
+        const file = encodeURIComponent(path.replace(/\.md$/i, ""));
+        return `obsidian://open?vault=${vault}&file=${file}`;
+      }
+
+      function compareLoops(left: OpenLoop, right: OpenLoop): number {
+        return (
+          left.focus.localeCompare(right.focus) ||
+          (left.priority ?? 9) - (right.priority ?? 9) ||
+          (left.deadline ?? "9999").localeCompare(right.deadline ?? "9999") ||
+          left.title.localeCompare(right.title)
+        );
+      }
+    </script>
+
+    <script lang="ts" client>
+      import { createClient } from "htmltool/client";
+
+      const client = createClient<Server>();
+      const state = {
+        snapshot: null as LoopSnapshot | null,
+        focus: "All",
+        status: "open",
+        query: "",
+      };
+      let loadVersion = 0;
+
+      const tableBody =
+        document.querySelector<HTMLTableSectionElement>("#loops-body")!;
+      const table = document.querySelector<HTMLElement>(".table-scroll")!;
+      const empty = document.querySelector<HTMLElement>("#empty")!;
+      const error = document.querySelector<HTMLElement>("#error")!;
+      const filters = document.querySelector<HTMLElement>("#focus-filters")!;
+      const search = document.querySelector<HTMLInputElement>("#search")!;
+      const refresh = document.querySelector<HTMLButtonElement>("#refresh")!;
+
+      refresh.addEventListener("click", () => load());
+      search.addEventListener("input", () => {
+        state.query = search.value.trim().toLowerCase();
+        render();
+      });
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "/" && document.activeElement !== search) {
+          event.preventDefault();
+          search.focus();
+        }
+        if (event.key === "r" && (event.metaKey || event.ctrlKey)) {
+          event.preventDefault();
+          load();
+        }
+      });
+
+      await load();
+
+      async function load(): Promise<void> {
+        const version = ++loadVersion;
+        refresh.disabled = true;
+        refresh.setAttribute("aria-label", "Refreshing open loops");
+        table.setAttribute("aria-busy", "true");
+        error.hidden = true;
+        empty.hidden = true;
+        state.snapshot = {
+          vault: "Vault",
+          scannedNotes: 0,
+          generatedAt: new Date().toISOString(),
+          loops: [],
+        };
+        try {
+          for await (const event of client.streamLoops({
+            includeDone: false,
+          })) {
+            if (version !== loadVersion) break;
+            if (event.type === "started") {
+              state.snapshot.vault = event.vault;
+              document.querySelector("#vault-name")!.textContent = event.vault;
+            } else if (event.type === "loop") {
+              state.snapshot.loops.push(event.loop);
+              if (state.snapshot.loops.length % 5 === 0) render();
+            } else {
+              state.snapshot.scannedNotes = event.scannedNotes;
+              state.snapshot.generatedAt = event.generatedAt;
+            }
+          }
+          renderFilters();
+          render();
+        } catch (cause) {
+          table.hidden = true;
+          empty.hidden = true;
+          error.hidden = false;
+          error.querySelector("p")!.textContent =
+            cause instanceof Error ? cause.message : String(cause);
+        } finally {
+          table.setAttribute("aria-busy", "false");
+          refresh.disabled = false;
+          refresh.setAttribute("aria-label", "Refresh open loops");
+        }
+      }
+
+      function renderFilters(): void {
+        const loops = state.snapshot?.loops ?? [];
+        const focuses = ["All", ...new Set(loops.map((loop) => loop.focus))];
+        const buttons = focuses.map((focus) => {
+          const button = element("button", "filter", focus);
+          button.type = "button";
+          button.dataset.focus = focus;
+          button.setAttribute("aria-pressed", String(focus === state.focus));
+          button.addEventListener("click", () => {
+            state.focus = focus;
+            renderFilters();
+            render();
+          });
+          return button;
+        });
+        filters.replaceChildren(...buttons);
+      }
+
+      function render(): void {
+        const snapshot = state.snapshot;
+        if (!snapshot) return;
+        const loops = snapshot.loops.filter((loop) => {
+          const inFocus = state.focus === "All" || loop.focus === state.focus;
+          const haystack = [
+            loop.title,
+            loop.nextAction,
+            loop.waitingOn,
+            loop.sourcePath,
+          ]
+            .join(" ")
+            .toLowerCase();
+          return inFocus && (!state.query || haystack.includes(state.query));
+        });
+
+        document.querySelector("#loop-count")!.textContent = String(
+          loops.length,
+        );
+        document.querySelector("#note-count")!.textContent = String(
+          snapshot.scannedNotes,
+        );
+        document.querySelector("#vault-name")!.textContent = snapshot.vault;
+        document.querySelector("#updated")!.textContent = formatTime(
+          snapshot.generatedAt,
+        );
+
+        table.hidden = loops.length === 0;
+        empty.hidden = loops.length !== 0;
+        if (loops.length === 0) {
+          tableBody.replaceChildren();
+          return;
+        }
+
+        const content = document.createDocumentFragment();
+        const groups = new Map<string, OpenLoop[]>();
+        for (const loop of loops) {
+          const group = groups.get(loop.focus) ?? [];
+          group.push(loop);
+          groups.set(loop.focus, group);
+        }
+        for (const [focus, group] of groups) {
+          content.append(groupRow(focus, group.length));
+          for (const loop of group) content.append(loopRow(loop));
+        }
+        tableBody.replaceChildren(content);
+      }
+
+      function groupRow(focus: string, count: number): HTMLTableRowElement {
+        const row = element("tr", "group-row");
+        const heading = element("th");
+        heading.colSpan = 6;
+        heading.scope = "rowgroup";
+        const label = element("span", "group-heading", focus);
+        label.append(" ", element("span", "group-count", String(count)));
+        heading.append(label);
+        row.append(heading);
+        return row;
+      }
+
+      function loopRow(loop: OpenLoop): HTMLTableRowElement {
+        const row = element("tr");
+        const nameCell = element("td");
+        const link = element("a", "loop-link");
+        link.href = loop.sourceUri;
+        link.title = `Open ${loop.sourcePath} in Obsidian`;
+        const icon = element("span", "note-icon", "▤");
+        icon.setAttribute("aria-hidden", "true");
+        link.append(icon, element("span", "", loop.title));
+        nameCell.append(link);
+
+        const nextAction = element(
+          "td",
+          "field",
+          loop.nextAction ?? "No next action",
+        );
+        if (!loop.nextAction) nextAction.classList.add("missing");
+        const waitingOn = element(
+          "td",
+          "field",
+          loop.waitingOn ?? "Not waiting",
+        );
+        if (!loop.waitingOn) waitingOn.classList.add("missing");
+        const deadline = element("td", "deadline", loop.deadline ?? "");
+        if (loop.deadline && loop.deadline < today())
+          deadline.classList.add("overdue");
+
+        const priorityCell = element("td");
+        const priority = element(
+          "span",
+          "priority",
+          loop.priority === null ? "" : `P${loop.priority}`,
+        );
+        priority.dataset.priority =
+          loop.priority === null ? "" : String(loop.priority);
+        priorityCell.append(priority);
+
+        const statusCell = element("td");
+        const status = element("span", "status", loop.status);
+        status.dataset.status = loop.status;
+        statusCell.append(status);
+
+        row.append(
+          nameCell,
+          nextAction,
+          waitingOn,
+          deadline,
+          priorityCell,
+          statusCell,
+        );
+        return row;
+      }
+
+      function element<K extends keyof HTMLElementTagNameMap>(
+        tag: K,
+        className = "",
+        text = "",
+      ): HTMLElementTagNameMap[K] {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text) node.textContent = text;
+        return node;
+      }
+
+      function formatTime(value: string): string {
+        return new Intl.DateTimeFormat(undefined, {
+          hour: "2-digit",
+          minute: "2-digit",
+        }).format(new Date(value));
+      }
+
+      function today(): string {
+        return new Date().toISOString().slice(0, 10);
+      }
+    </script>
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="title-row">
+        <span class="mark" aria-hidden="true">↻</span>
+        <h1>Open Loops</h1>
+        <div class="summary" aria-live="polite">
+          <span><strong id="loop-count">0</strong> loops</span>
+          <span>·</span>
+          <span><strong id="note-count">0</strong> notes</span>
+          <span>·</span>
+          <span id="vault-name">Vault</span>
+          <span>·</span>
+          <span>Updated <span id="updated">now</span></span>
+        </div>
+      </div>
+      <nav class="toolbar" aria-label="Open loop filters">
+        <div id="focus-filters" class="toolbar" aria-label="Focus areas">
+          <button class="filter" type="button" aria-pressed="true">All</button>
+        </div>
+        <span class="toolbar-spacer"></span>
+        <label class="search-wrap">
+          <span aria-hidden="true">⌕</span>
+          <span class="sr-only">Search open loops</span>
+          <input
+            id="search"
+            type="search"
+            placeholder="Search  /"
+            autocomplete="off"
+          />
+        </label>
+        <button
+          id="refresh"
+          class="icon-button"
+          type="button"
+          aria-label="Refresh open loops"
+          title="Refresh (Ctrl+R)"
+        >
+          ↻
+        </button>
+      </nav>
+    </header>
+
+    <main>
+      <div class="table-scroll" aria-busy="true">
+        <table class="loops-table">
+          <caption class="sr-only">
+            Open loops grouped by focus area
+          </caption>
+          <colgroup>
+            <col />
+            <col />
+            <col />
+            <col />
+            <col />
+            <col />
+          </colgroup>
+          <thead>
+            <tr>
+              <th scope="col">Name</th>
+              <th scope="col">Next action</th>
+              <th scope="col">Waiting on</th>
+              <th scope="col">Deadline / Event</th>
+              <th scope="col">Priority</th>
+              <th scope="col">Status</th>
+            </tr>
+          </thead>
+          <tbody id="loops-body">
+            <tr>
+              <td><span class="skeleton"></span></td>
+              <td><span class="skeleton"></span></td>
+              <td><span class="skeleton"></span></td>
+              <td></td>
+              <td></td>
+              <td><span class="skeleton"></span></td>
+            </tr>
+            <tr>
+              <td><span class="skeleton"></span></td>
+              <td><span class="skeleton"></span></td>
+              <td><span class="skeleton"></span></td>
+              <td></td>
+              <td></td>
+              <td><span class="skeleton"></span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <section id="empty" class="empty-state" hidden>
+        <h2>No matching open loops</h2>
+        <p>
+          Add <code>open-loop: true</code> to note frontmatter, tag a note
+          <code>#open-loop</code>, or add an unchecked Markdown task.
+        </p>
+      </section>
+
+      <section id="error" class="error-state" role="alert" hidden>
+        <h2>Could not scan the vault</h2>
+        <p>Check the terminal for details.</p>
+      </section>
+    </main>
+  </body>
+</html>

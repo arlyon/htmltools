@@ -1,0 +1,46 @@
+{
+  "name": "htmltool",
+  "version": "0.1.0",
+  "private": true,
+  "repository": "github:arlyon/htmltools",
+  "type": "module",
+  "bin": {
+    "htmltool": "./src/cli.ts"
+  },
+  "exports": {
+    "./client": {
+      "types": "./src/runtime/client.ts",
+      "import": "./src/runtime/client.ts"
+    },
+    "./server": {
+      "types": "./src/runtime/server.ts",
+      "import": "./src/runtime/server.ts"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "client": ["src/runtime/client.ts"],
+      "server": ["src/runtime/server.ts"]
+    }
+  },
+  "scripts": {
+    "build": "bun build --compile src/cli.ts --outfile dist/htmltool",
+    "check": "tsc --noEmit && bun test",
+    "dev": "bun run src/cli.ts",
+    "release:artifacts": "bash scripts/build-release.sh",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@cfworker/json-schema": "4.1.1",
+    "@modelcontextprotocol/server": "2.0.0-alpha.2",
+    "birpc": "4.0.0",
+    "parse5": "8.0.1",
+    "superjson": "2.2.6",
+    "typescript": "5.9.3",
+    "yaml": "2.9.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.10"
+  }
+}

@@ -1,0 +1,229 @@
+--- installed/html/languages/html/injections.scm
++++ installed/html/languages/html/injections.scm
+@@ -2,7 +2,21 @@
+   (#set! injection.language "comment"))
+ 
+ (script_element
++  (start_tag
++    (attribute
++      (attribute_name) @_lang_name
++      (quoted_attribute_value
++        (attribute_value) @_lang_value)))
+   (raw_text) @injection.content
++  (#eq? @_lang_name "lang")
++  (#match? @_lang_value "^(ts|typescript)$")
++  (#set! injection.language "typescript")
++  (#set! injection.combined))
++
++(script_element
++  (start_tag) @_start_tag
++  (raw_text) @injection.content
++  (#not-match? @_start_tag "lang[ ]*=[ ]*['\"](ts|typescript)['\"]")
+   (#set! injection.language "javascript"))
+ 
+ (style_element
+--- work/html/node_modules/@zed-industries/vscode-langservers-extracted/packages/html/lib/modes/embeddedSupport.js
++++ work/html/node_modules/@zed-industries/vscode-langservers-extracted/packages/html/lib/modes/embeddedSupport.js
+@@ -27,6 +27,7 @@
+ exports.CSS_STYLE_RULE = void 0;
+ exports.getDocumentRegions = getDocumentRegions;
+ var languageModes_1 = require("./languageModes");
++var node_url_1 = require("node:url");
+ exports.CSS_STYLE_RULE = '__';
+ function getDocumentRegions(languageService, document) {
+   var regions = [];
+@@ -67,6 +68,8 @@
+             value = value.substr(1, value.length - 1);
+           }
+           importedScripts.push(value);
++        } else if (lastAttributeName === 'lang' && lastTagName.toLowerCase() === 'script' && /^["']?(ts|typescript)["']?$/i.test(scanner.getTokenText())) {
++          languageIdFromType = 'typescript';
+         } else if (lastAttributeName === 'type' && lastTagName.toLowerCase() === 'script') {
+           if (/["'](module|(text|application)\/(java|ecma)script|text\/babel)["']/.test(scanner.getTokenText())) {
+             languageIdFromType = 'javascript';
+@@ -232,7 +235,11 @@
+     _iterator4.f();
+   }
+   result = substituteWithWhitespace(result, currentPos, oldContent.length, oldContent, lastSuffix, '');
+-  return languageModes_1.TextDocument.create(document.uri, languageId, document.version, result);
++  var embeddedUri = document.uri;
++  if (document.uri.startsWith('file:') && (languageId === 'typescript' || languageId === 'javascript')) {
++    embeddedUri = (0, node_url_1.fileURLToPath)(document.uri) + '.__embedded.' + (languageId === 'typescript' ? 'ts' : 'js');
++  }
++  return languageModes_1.TextDocument.create(embeddedUri, languageId, document.version, result);
+ }
+ function getPrefix(c) {
+   if (c.attributeValue) {
+--- work/html/node_modules/@zed-industries/vscode-langservers-extracted/packages/html/lib/modes/javascriptMode.js
++++ work/html/node_modules/@zed-industries/vscode-langservers-extracted/packages/html/lib/modes/javascriptMode.js
+@@ -57,86 +57,102 @@
+ var languageModes_1 = require("./languageModes");
+ var strings_1 = require("../utils/strings");
+ var ts = require("typescript");
++var node_path_1 = require("node:path");
+ var javascriptSemanticTokens_1 = require("./javascriptSemanticTokens");
+ var JS_WORD_REGEX = /(-?\d*\.\d\w*)|([^\`\~\!\@\#\%\^\&\*\(\)\-\=\+\[\{\]\}\\\|\;\:\'\"\,\.\<\>\/\?\s]+)/g;
+ function getLanguageServiceHost(scriptKind) {
+-  var compilerOptions = {
++  var defaultCompilerOptions = {
+     allowNonTsExtensions: true,
+     allowJs: true,
+     lib: ['lib.es2020.full.d.ts'],
+     target: ts.ScriptTarget.Latest,
+-    moduleResolution: ts.ModuleResolutionKind.Classic,
+-    experimentalDecorators: false
++    module: ts.ModuleKind.ESNext,
++    moduleResolution: ts.ModuleResolutionKind.Bundler,
++    experimentalDecorators: false,
++    noEmit: true
+   };
+-  var currentTextDocument = languageModes_1.TextDocument.create('init', 'javascript', 1, '');
++  var compilerOptions = defaultCompilerOptions;
++  var currentTextDocument = languageModes_1.TextDocument.create('init.ts', 'javascript', 1, '');
++  var projectVersion = 0;
++  function loadCompilerOptions(fileName) {
++    var configPath = ts.findConfigFile((0, node_path_1.dirname)(fileName), ts.sys.fileExists, 'tsconfig.json');
++    if (!configPath) {
++      return Object.assign({}, defaultCompilerOptions);
++    }
++    var loaded = ts.readConfigFile(configPath, ts.sys.readFile);
++    if (loaded.error) {
++      return Object.assign({}, defaultCompilerOptions);
++    }
++    var parsed = ts.parseJsonConfigFileContent(loaded.config, ts.sys, (0, node_path_1.dirname)(configPath));
++    return Object.assign({}, defaultCompilerOptions, parsed.options, {
++      allowNonTsExtensions: true,
++      allowJs: true,
++      noEmit: true
++    });
++  }
+   var jsLanguageService = Promise.resolve().then(function () {
+     return require( /* webpackChunkName: "javascriptLibs" */'./javascriptLibs');
+   }).then(function (libs) {
++    function sourceText(fileName) {
++      if (fileName === currentTextDocument.uri) {
++        return currentTextDocument.getText();
++      }
++      var text = ts.sys.readFile(fileName);
++      if (typeof text === 'string') {
++        return text;
++      }
++      if (!(0, node_path_1.isAbsolute)(fileName)) {
++        return libs.loadLibrary(fileName);
++      }
++      return undefined;
++    }
+     var host = {
+       getCompilationSettings: function getCompilationSettings() {
+         return compilerOptions;
+       },
++      getProjectVersion: function getProjectVersion() {
++        return String(projectVersion);
++      },
+       getScriptFileNames: function getScriptFileNames() {
+-        return [currentTextDocument.uri, 'jquery'];
++        return [currentTextDocument.uri];
+       },
+       getScriptKind: function getScriptKind(fileName) {
+         if (fileName === currentTextDocument.uri) {
+           return scriptKind;
+         }
+-        return fileName.substr(fileName.length - 2) === 'ts' ? ts.ScriptKind.TS : ts.ScriptKind.JS;
++        if (/\.tsx$/i.test(fileName)) return ts.ScriptKind.TSX;
++        if (/\.(ts|mts|cts)$/i.test(fileName)) return ts.ScriptKind.TS;
++        if (/\.jsx$/i.test(fileName)) return ts.ScriptKind.JSX;
++        return ts.ScriptKind.JS;
+       },
+       getScriptVersion: function getScriptVersion(fileName) {
+-        if (fileName === currentTextDocument.uri) {
+-          return String(currentTextDocument.version);
+-        }
+-        return '1'; // default lib an jquery.d.ts are static
++        return fileName === currentTextDocument.uri ? String(currentTextDocument.version) : '1';
+       },
+       getScriptSnapshot: function getScriptSnapshot(fileName) {
+-        var text = '';
+-        if (fileName === currentTextDocument.uri) {
+-          text = currentTextDocument.getText();
+-        } else {
+-          text = libs.loadLibrary(fileName);
+-        }
+-        return {
+-          getText: function getText(start, end) {
+-            return text.substring(start, end);
+-          },
+-          getLength: function getLength() {
+-            return text.length;
+-          },
+-          getChangeRange: function getChangeRange() {
+-            return undefined;
+-          }
+-        };
++        var text = sourceText(fileName);
++        return typeof text === 'string' ? ts.ScriptSnapshot.fromString(text) : undefined;
+       },
+       getCurrentDirectory: function getCurrentDirectory() {
+-        return '';
++        return (0, node_path_1.dirname)(currentTextDocument.uri);
+       },
+-      getDefaultLibFileName: function getDefaultLibFileName(_options) {
+-        return 'es2020.full';
++      getDefaultLibFileName: function getDefaultLibFileName(options) {
++        return ts.getDefaultLibFilePath(options);
+       },
+-      readFile: function readFile(path, _encoding) {
+-        if (path === currentTextDocument.uri) {
+-          return currentTextDocument.getText();
+-        } else {
+-          return libs.loadLibrary(path);
+-        }
++      readFile: function readFile(fileName) {
++        return sourceText(fileName);
+       },
+-      fileExists: function fileExists(path) {
+-        if (path === currentTextDocument.uri) {
+-          return true;
+-        } else {
+-          return !!libs.loadLibrary(path);
+-        }
++      fileExists: function fileExists(fileName) {
++        return fileName === currentTextDocument.uri || ts.sys.fileExists(fileName);
++      },
++      directoryExists: ts.sys.directoryExists,
++      readDirectory: ts.sys.readDirectory,
++      getDirectories: ts.sys.getDirectories,
++      realpath: ts.sys.realpath,
++      useCaseSensitiveFileNames: function useCaseSensitiveFileNames() {
++        return ts.sys.useCaseSensitiveFileNames;
+       },
+-      directoryExists: function directoryExists(path) {
+-        // typescript tries to first find libraries in node_modules/@types and node_modules/@typescript
+-        // there's no node_modules in our setup
+-        if (path.startsWith('node_modules')) {
+-          return false;
+-        }
+-        return true;
++      getNewLine: function getNewLine() {
++        return ts.sys.newLine;
+       }
+     };
+     return ts.createLanguageService(host);
+@@ -148,6 +164,8 @@
+           while (1) switch (_context.prev = _context.next) {
+             case 0:
+               currentTextDocument = jsDocument;
++              compilerOptions = loadCompilerOptions(jsDocument.uri);
++              projectVersion++;
+               return _context.abrupt("return", jsLanguageService);
+             case 2:
+             case "end":
+@@ -166,8 +184,7 @@
+     }
+   };
+ }
+-var ignoredErrors = [1108, /* A_return_statement_can_only_be_used_within_a_function_body_1108 */
+-2792 /* Cannot_find_module_0_Did_you_mean_to_set_the_moduleResolution_option_to_node_or_to_add_aliases_to_the_paths_option */];
++var ignoredErrors = [1108 /* A_return_statement_can_only_be_used_within_a_function_body_1108 */];
+ function getJavaScriptMode(documentRegions, languageId, workspace) {
+   var jsDocuments = (0, languageModelCache_1.getLanguageModelCache)(10, 60, function (document) {
+     return documentRegions.get(document).getEmbeddedDocument(languageId);
