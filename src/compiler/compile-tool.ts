@@ -91,7 +91,7 @@ async function prepareTool(toolPath: string): Promise<PreparedTool> {
 						path: join(toolDirectory, `.htmltool-${safeName}.app.ts`),
 						source: [
 							'import { startMcpApp as __htmltoolStartMcpApp } from "htmltool/mcp-app";',
-							`__htmltoolStartMcpApp(${JSON.stringify({ name: parsed.manifest.name, version: "0.1.1" })});`,
+							`__htmltoolStartMcpApp(${JSON.stringify({ name: parsed.manifest.name, version: "0.2.0" })});`,
 							clientSource,
 						].join("\n\n"),
 					},

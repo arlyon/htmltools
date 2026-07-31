@@ -5,7 +5,7 @@ A Bun runner for HTML-first local tools with embedded server TypeScript, typed b
 ## Install
 
 ```bash
-mise use -g github:arlyon/htmltools@0.1.1
+mise use -g github:arlyon/htmltools@0.2.0
 htmltool instructions
 ```
 
@@ -28,7 +28,7 @@ open-loops/
     "start": "htmltool index.html"
   },
   "dependencies": {
-    "htmltool": "github:arlyon/htmltools#v0.1.1",
+    "htmltool": "github:arlyon/htmltools#v0.2.0",
     "yaml": "^2.9.0"
   },
   "devDependencies": {

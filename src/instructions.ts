@@ -105,9 +105,33 @@ Annotate a hyphenated custom element inside the document body with the name of a
 
 Each tool name may have one annotated custom element. HTMLTool generates a text/html;profile=mcp-app resource containing the element, bundled local assets, and the complete client bundle, then links it from the matching MCP tool. The referenced method must exist and use mcp(...). Unannotated MCP tools remain data-only.
 
-Use native customElements.define() in the client block and perform component-specific DOM work in connectedCallback(). HTMLTool waits up to five seconds for the element to be defined and connected. It buffers official MCP input/result payloads until then and dispatches them in order as bubbling htmltool:input and htmltool:result CustomEvents. Their detail is the unchanged MCP Apps notification payload.
+Use native customElements.define() in the client block and perform component-specific DOM work in connectedCallback():
 
-Existing createClient() calls work unchanged: every rpc() and mcp() method is available to the server's own MCP App through an MCP tool marked app-only, while the standalone browser uses WebSockets. AsyncIterable RPC retains pull-based streaming in either environment. App-only visibility is enforced by compliant hosts; HTMLTool's local HTTP/MCP endpoint has no authentication, so do not bind untrusted interfaces.
+~~~ts
+customElements.define("greeting-card", class extends HTMLElement {
+  connectedCallback() {
+    this.addEventListener("htmltool:input", (event) => {
+      const input = (event as CustomEvent<{ arguments?: { name?: string } }>).detail;
+      this.querySelector("output")!.textContent =
+        "Greeting " + (input.arguments?.name ?? "someone") + "…";
+    });
+
+    this.addEventListener("htmltool:result", (event) => {
+      const result = (event as CustomEvent<{
+        content: unknown[];
+        structuredContent?: { message?: string };
+        isError?: boolean;
+      }>).detail;
+      this.querySelector("output")!.textContent =
+        result.structuredContent?.message ?? "No greeting returned";
+    });
+  }
+});
+~~~
+
+HTMLTool waits up to five seconds for the element to be defined and connected. It buffers official MCP input/result payloads until then and dispatches them in order as bubbling htmltool:input and htmltool:result CustomEvents. Input detail is the official { arguments?: Record<string, unknown> } payload. Result detail is the unchanged CallToolResult with content, optional structuredContent, and optional isError.
+
+The initial MCP tool call launches the app and supplies its first result. After mounting, normal user interactions may call createClient() methods. Every rpc() and mcp() method is available to the server's own MCP App through an MCP tool marked app-only, while the standalone browser uses WebSockets. AsyncIterable RPC retains pull-based streaming in either environment. App-only visibility is enforced by compliant hosts; HTMLTool's local HTTP/MCP endpoint has no authentication, so do not bind untrusted interfaces.
 
 Local stylesheet links, CSS @import and url() dependencies, images, fonts, and media are bundled as data URLs. Remote assets and ordinary script src attributes are rejected because MCP App resources run under host-controlled content security policies; put browser code in the htmltool client block. Bundles are limited to 256 assets, 10 MiB per asset, 25 MiB of source assets, and 40 MiB per generated app document.
 
@@ -133,4 +157,12 @@ htmltool check tool.html
 ~~~
 
 The browser opens by default. Startup bundles the server and browser code in memory but deliberately skips type-checking. Run htmltool check to type-check the actual common + server and common + client programs.
+
+Connect an MCP Apps-compatible host to the /mcp URL printed at startup. Use --no-open when the host should display the generated UI instead of also opening the standalone browser.
+
+## Obsidian integration
+
+The desktop-only plugin in integrations/obsidian handles .html files in a local Obsidian vault. A file with one valid application/htmltool+json manifest starts an HTMLTool child process and renders its loopback UI in an Obsidian pane; closing or navigating away from the pane stops it. Ordinary HTML is previewed rather than executed. The plugin supplies the absolute vault path through HTMLTOOL_VAULT.
+
+Build it with bun run check inside integrations/obsidian, then copy main.js, manifest.json, and styles.css into <vault>/.obsidian/plugins/htmltool/. Enable the community plugin and configure the HTMLTool executable in its settings. Obsidian mobile cannot launch the process.
 `;

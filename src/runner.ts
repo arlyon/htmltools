@@ -175,7 +175,7 @@ async function createMcpEndpoint(
 	transport: WebStandardStreamableHTTPServerTransport;
 	close(): Promise<void>;
 }> {
-	const server = new McpServer({ name, version: "0.1.1" });
+	const server = new McpServer({ name, version: "0.2.0" });
 	for (const reservedName of [
 		HTMLTOOL_APP_RPC_TOOL,
 		HTMLTOOL_APP_CLOSE_METHOD,
