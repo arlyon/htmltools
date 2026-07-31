@@ -2,11 +2,26 @@ export const instructions = String.raw`# HTMLTool authoring instructions
 
 HTMLTool runs HTML-first local tools with Bun. A tool is one HTML file plus ordinary project files such as package.json, tsconfig.json, CSS, and assets.
 
-## Project environment
+## Package environment
 
-Use the nearest package.json, node_modules, and tsconfig.json. Declare every package imported by the tool in package.json and install it with the project's configured package manager. Do not put dependencies in the HTMLTool manifest.
+For a portable single-file tool, declare every imported package in the HTMLTool manifest. The installed htmltool executable does not make imports such as "htmltool/server" or "htmltool/client" available to the tool bundle, so declare htmltool itself:
 
-Recommended tsconfig.json:
+~~~html
+<script type="application/htmltool+json">
+  {
+    "name": "hello-tool",
+    "dependencies": {
+      "htmltool": "github:arlyon/htmltools#v0.3.0"
+    }
+  }
+</script>
+~~~
+
+HTMLTool first attempts to bundle without installing. If bundling fails and the embedded environment is missing, it materializes this dependency map under its content-addressed cache, invokes its embedded Bun package manager, and retries once. htmltool check installs first because type-checking requires dependency types. On Linux the default is XDG_CACHE_HOME/htmltool/environments/<hash>, falling back to ~/.cache/htmltool/environments/<hash>; set HTMLTOOL_CACHE_DIR to override the htmltool cache root. Installs disable lifecycle scripts. Pin exact versions for reproducibility. Relative file: and link: specifications resolve from the HTML file's directory; workspace: specifications are not supported in the external cache.
+
+A tool may instead omit manifest dependencies and use an ordinary project package.json, node_modules, and tsconfig.json. With an uncached embedded manifest, HTMLTool first tries that nearest project environment; a successful bundle skips installation. If the first bundle fails, HTMLTool installs every declared package and retries in the isolated cache, which is reused on later runs. HTML-linked assets still resolve beside the HTML file. Keep TypeScript in the common, server, and client blocks for this single-file mode; use project mode when importing local TypeScript modules. Run the project's package manager before HTMLTool when using project mode. A tsconfig.json is optional; when present, HTMLTool uses the nearest one.
+
+Recommended tsconfig.json for a project-based tool:
 
 ~~~json
 {
@@ -36,7 +51,12 @@ Use lang="ts" to mark HTMLTool TypeScript blocks. Give each block exactly one ro
     <link rel="stylesheet" href="./tool.css">
 
     <script type="application/htmltool+json">
-      { "name": "hello-tool" }
+      {
+        "name": "hello-tool",
+        "dependencies": {
+          "htmltool": "github:arlyon/htmltools#v0.3.0"
+        }
+      }
     </script>
 
     <script lang="ts" common>
@@ -93,9 +113,15 @@ Use lang="ts" to mark HTMLTool TypeScript blocks. Give each block exactly one ro
 - Server blocks may use Bun, Node APIs, the filesystem, environment variables, and installed packages.
 - Common code is compiled into both server and browser programs; keep server-only values and imports out of it.
 
-## MCP Apps
+## MCP Apps / MCP UI
 
-Annotate a hyphenated custom element inside the document body with the name of an mcp(...) method to expose that fragment as the method's UI:
+An MCP UI requires three connected pieces in the same HTML file:
+
+1. An mcp({...}) server method with input and output schemas.
+2. One hyphenated custom element annotated with data-htmltool-ui="<method-name>".
+3. A client-block customElements.define(...) implementation for that element.
+
+Annotate the custom element inside the document body with the name of the mcp(...) method to expose that fragment as the method's UI:
 
 ~~~html
 <greeting-card data-htmltool-ui="greet">
@@ -103,7 +129,7 @@ Annotate a hyphenated custom element inside the document body with the name of a
 </greeting-card>
 ~~~
 
-Each tool name may have one annotated custom element. HTMLTool generates a text/html;profile=mcp-app resource containing the element, bundled local assets, and the complete client bundle, then links it from the matching MCP tool. The referenced method must exist and use mcp(...). Unannotated MCP tools remain data-only.
+Each tool name may have one annotated custom element. HTMLTool generates a ui:// resource with MIME type text/html;profile=mcp-app containing the element, bundled local assets, and the complete client bundle. The matching MCP tool advertises that URI through _meta.ui.resourceUri so a compatible host can fetch and render it. The referenced method must exist and use mcp(...). Unannotated MCP tools remain data-only, and hosts without MCP Apps support can still call every MCP tool for its structured result.
 
 Use native customElements.define() in the client block and perform component-specific DOM work in connectedCallback():
 
@@ -152,13 +178,27 @@ Routes:
 htmltool tool.html
 htmltool tool.html --no-open
 htmltool tool.html --host 127.0.0.1 --port 7331
+htmltool tool.html --stdio
 htmltool tool.html -- --tool-specific-option value
 htmltool check tool.html
 ~~~
 
-The browser opens by default. Startup bundles the server and browser code in memory but deliberately skips type-checking. Run htmltool check to type-check the actual common + server and common + client programs.
+The default mode opens the standalone browser and serves MCP 2.0 Streamable HTTP at the printed /mcp URL. Startup bundles the server and browser code in memory but deliberately skips type-checking. Run htmltool check to type-check the actual common + server and common + client programs.
 
-Connect an MCP Apps-compatible host to the /mcp URL printed at startup. Use --no-open when the host should display the generated UI instead of also opening the standalone browser.
+Use --stdio for a local process-spawned MCP server. Stdio mode starts no HTTP server or browser; stdout is reserved for JSON-RPC, console methods are redirected to stderr, and startup diagnostics go to stderr. Server code must not write directly to process.stdout. MCP tools, generated ui:// resources, htmltool:input/htmltool:result events, and createClient() calls from inside the MCP App all continue to work over the host's MCP connection. --host and --port cannot be combined with --stdio.
+
+Configure a compatible host with an absolute tool path:
+
+~~~json
+{
+  "mcpServers": {
+    "hello-tool": {
+      "command": "htmltool",
+      "args": ["/absolute/path/to/tool.html", "--stdio"]
+    }
+  }
+}
+~~~
 
 ## Obsidian integration
 

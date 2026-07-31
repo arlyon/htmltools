@@ -5,13 +5,28 @@ A Bun runner for HTML-first local tools with embedded server TypeScript, typed b
 ## Install
 
 ```bash
-mise use -g github:arlyon/htmltools@0.2.0
+mise use -g github:arlyon/htmltools@0.3.0
 htmltool instructions
 ```
 
 ## Tool environment
 
-An HTML tool uses an ordinary package environment. `htmltool` does not install or resolve dependencies itself.
+A portable tool can declare dependencies directly in its HTMLTool manifest:
+
+```html
+<script type="application/htmltool+json">
+  {
+    "name": "hello-tool",
+    "dependencies": {
+      "htmltool": "github:arlyon/htmltools#v0.3.0"
+    }
+  }
+</script>
+```
+
+The installed CLI does not make `htmltool/server` or `htmltool/client` resolvable to a tool bundle, so include `htmltool` in embedded dependencies. HTMLTool first attempts to bundle without installing. If that bundle fails and the embedded environment is missing, it invokes its embedded Bun package manager with lifecycle scripts disabled, installs into a content-addressed cache under `${XDG_CACHE_HOME:-~/.cache}/htmltool/environments/` on Linux, and retries once. `htmltool check` installs first because type-checking requires dependency types. Set `HTMLTOOL_CACHE_DIR` to override the cache root. Pin exact versions for reproducibility.
+
+Alternatively, an HTML tool can use an ordinary package environment:
 
 ```text
 open-loops/
@@ -28,7 +43,7 @@ open-loops/
     "start": "htmltool index.html"
   },
   "dependencies": {
-    "htmltool": "github:arlyon/htmltools#v0.2.0",
+    "htmltool": "github:arlyon/htmltools#v0.3.0",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
@@ -44,7 +59,7 @@ bun install
 bun run start
 ```
 
-The runner compiles virtual client and server entries entirely in memory. Their virtual paths sit beneath the tool directory, so Bun and TypeScript resolve bare imports using the nearest `package.json`, `node_modules`, and `tsconfig.json` without writing build artifacts. Missing packages are reported as normal unresolved imports.
+The runner compiles virtual client and server entries entirely in memory. Without manifest dependencies, Bun and TypeScript resolve bare imports using the nearest `package.json`, `node_modules`, and `tsconfig.json`. With an uncached embedded manifest, HTMLTool tries that nearest environment first; a successful bundle skips installation. If bundling fails, it installs every declared package and retries in the isolated cache, which is reused on later runs. HTML-linked assets continue to resolve beside the HTML file. Keep TypeScript in the embedded blocks for single-file mode; use project mode when importing local TypeScript modules. Missing packages are reported as normal unresolved imports.
 
 The browser opens by default. Pass `--no-open` when running headlessly:
 
@@ -58,7 +73,12 @@ A tool has a small JSON manifest and TypeScript blocks for shared contracts, ser
 
 ```html
 <script type="application/htmltool+json">
-  { "name": "hello" }
+  {
+    "name": "hello",
+    "dependencies": {
+      "htmltool": "github:arlyon/htmltools#v0.3.0"
+    }
+  }
 </script>
 
 <script lang="ts" common>
@@ -85,7 +105,7 @@ A tool has a small JSON manifest and TypeScript blocks for shared contracts, ser
 
 Run `htmltool check index.html` to type-check the real `common + server` and `common + client` programs. Normal startup skips type-checking and bundles both runtime programs in memory. In-editor support uses the editor's existing HTML/TypeScript handling; no language server is bundled with the runner.
 
-## MCP Apps
+## MCP Apps / MCP UI
 
 An HTMLTool can expose an interactive [MCP App](https://modelcontextprotocol.io/docs/extensions/apps) without a separate frontend project. Define the launch operation as an `mcp(...)` server method:
 
@@ -110,7 +130,7 @@ Then annotate one hyphenated custom element with that method name:
 </greeting-card>
 ```
 
-HTMLTool packages the annotated fragment, document head styles, and client bundle as a `text/html;profile=mcp-app` resource. The matching MCP tool automatically advertises its generated `ui://` resource. Connect an MCP Apps-compatible host to the `/mcp` URL printed at startup; the model supplies tool arguments and receives structured data, while HTMLTool supplies the interface.
+HTMLTool packages the annotated fragment, document head styles, and client bundle as a `text/html;profile=mcp-app` resource. The matching MCP tool automatically advertises its generated `ui://` resource. Connect an MCP Apps-compatible host to the `/mcp` URL printed at startup; the model supplies tool arguments and receives structured data, while HTMLTool supplies the interface. The tool advertises the generated `ui://` resource through `_meta.ui.resourceUri`.
 
 Define the element with the native Custom Elements API. The complete client bundle is included, but only elements present in the extracted fragment connect and mount:
 
@@ -134,6 +154,14 @@ HTMLTool buffers the official MCP input/result payloads until the element is def
 Existing `createClient()` calls also work inside the MCP App. HTMLTool transparently routes every `rpc()` and `mcp()` method through an MCP tool marked app-only, including async iterables, while the standalone browser continues using WebSockets. App-only visibility is enforced by compliant hosts; HTMLTool's local HTTP/MCP endpoint has no authentication, so do not bind untrusted interfaces.
 
 Local stylesheets, CSS imports and URLs, images, fonts, and media are bundled as data URLs; remote assets are rejected. Bundles are limited to 256 assets, 10 MiB per asset, 25 MiB of source assets, and 40 MiB per generated app document.
+
+For local process-spawned integrations, serve MCP and MCP UI over stdio:
+
+```bash
+htmltool /absolute/path/to/tool.html --stdio
+```
+
+Stdio mode starts no HTTP server or browser and reserves stdout for JSON-RPC. Console methods are redirected to stderr; server code must not write directly to `process.stdout`. Tools, `ui://` resources, UI input/result events, and app-only `createClient()` calls use the host's MCP connection. Configure a compatible host with `"command": "htmltool"` and `"args": ["/absolute/path/to/tool.html", "--stdio"]`.
 
 Zed needs a project-aware embedded TypeScript patch for imported types and package resolution. See [Zed setup for HTMLTool](docs/zed.md).
 

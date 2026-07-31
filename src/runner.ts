@@ -1,6 +1,8 @@
 import { isAbsolute, relative, resolve } from "node:path";
+import type { Readable, Writable } from "node:stream";
 import {
 	McpServer,
+	StdioServerTransport,
 	WebStandardStreamableHTTPServerTransport,
 } from "@modelcontextprotocol/server";
 import { createBirpc } from "birpc";
@@ -39,31 +41,25 @@ export interface RunningTool {
 	stop(): void;
 }
 
+export interface RunningStdioTool {
+	stop(): Promise<void>;
+}
+
 export async function runTool(
 	compiled: CompiledTool,
 	options: { hostname: string; port: number },
 ): Promise<RunningTool> {
-	const moduleUrl = URL.createObjectURL(compiled.serverBundle);
-	let serverModule: { default?: RuntimeDefinition };
-	try {
-		serverModule = (await import(moduleUrl)) as {
-			default?: RuntimeDefinition;
-		};
-	} finally {
-		URL.revokeObjectURL(moduleUrl);
-	}
-	if (!serverModule.default || typeof serverModule.default !== "object") {
-		throw new Error(
-			"The server block must default-export createServer<Server>(...)",
-		);
-	}
-
-	const definition = serverModule.default;
-	const mcp = await createMcpEndpoint(
+	const definition = await loadDefinition(compiled);
+	const mcp = createMcpServer(
 		compiled.parsed.manifest.name,
 		definition,
 		compiled.ui,
 	);
+	const transport = new WebStandardStreamableHTTPServerTransport({
+		sessionIdGenerator: undefined,
+		enableJsonResponse: true,
+	});
+	await mcp.server.connect(transport);
 	const server = Bun.serve<SocketData>({
 		hostname: options.hostname,
 		port: options.port,
@@ -76,7 +72,7 @@ export async function runTool(
 			}
 
 			if (url.pathname === "/mcp") {
-				return mcp.transport.handleRequest(request);
+				return transport.handleRequest(request);
 			}
 			if (url.pathname === "/.htmltool/rpc") {
 				if (bunServer.upgrade(request, { data: {} })) return undefined;
@@ -167,15 +163,50 @@ export async function runTool(
 	};
 }
 
-async function createMcpEndpoint(
+export async function runToolStdio(
+	compiled: CompiledTool,
+	streams: { stdin?: Readable; stdout?: Writable } = {},
+): Promise<RunningStdioTool> {
+	const definition = await loadDefinition(compiled);
+	const mcp = createMcpServer(
+		compiled.parsed.manifest.name,
+		definition,
+		compiled.ui,
+	);
+	const transport = new StdioServerTransport(streams.stdin, streams.stdout);
+	await mcp.server.connect(transport);
+	return { stop: () => mcp.close() };
+}
+
+async function loadDefinition(
+	compiled: CompiledTool,
+): Promise<RuntimeDefinition> {
+	const moduleUrl = URL.createObjectURL(compiled.serverBundle);
+	let serverModule: { default?: RuntimeDefinition };
+	try {
+		serverModule = (await import(moduleUrl)) as {
+			default?: RuntimeDefinition;
+		};
+	} finally {
+		URL.revokeObjectURL(moduleUrl);
+	}
+	if (!serverModule.default || typeof serverModule.default !== "object") {
+		throw new Error(
+			"The server block must default-export createServer<Server>(...)",
+		);
+	}
+	return serverModule.default;
+}
+
+function createMcpServer(
 	name: string,
 	definition: RuntimeDefinition,
 	ui: CompiledUi[],
-): Promise<{
-	transport: WebStandardStreamableHTTPServerTransport;
+): {
+	server: McpServer;
 	close(): Promise<void>;
-}> {
-	const server = new McpServer({ name, version: "0.2.0" });
+} {
+	const server = new McpServer({ name, version: "0.3.0" });
 	for (const reservedName of [
 		HTMLTOOL_APP_RPC_TOOL,
 		HTMLTOOL_APP_CLOSE_METHOD,
@@ -248,13 +279,8 @@ async function createMcpEndpoint(
 	const appSessions = new Map<string, AppRpcSession>();
 	if (ui.length > 0) registerAppRpcBridge(server, definition, appSessions);
 
-	const transport = new WebStandardStreamableHTTPServerTransport({
-		sessionIdGenerator: undefined,
-		enableJsonResponse: true,
-	});
-	await server.connect(transport);
 	return {
-		transport,
+		server,
 		async close() {
 			await Promise.all(
 				[...appSessions.values()].map((session) => {

@@ -2,13 +2,14 @@
 import { resolve } from "node:path";
 import { checkTool, compileTool } from "./compiler/compile-tool.ts";
 import { instructions } from "./instructions.ts";
-import { runTool } from "./runner.ts";
+import { runTool, runToolStdio } from "./runner.ts";
 
 interface CliOptions {
 	toolPath: string;
 	hostname: string;
 	port: number;
 	openBrowser: boolean;
+	stdio: boolean;
 }
 
 const help = `Usage:
@@ -24,6 +25,7 @@ Options:
   --host HOST   Bind address (default: 127.0.0.1)
   --port PORT   HTTP port (default: 7331)
   --no-open     Do not open the browser
+  --stdio       Serve MCP and MCP Apps over stdio only
   -h, --help    Show this help`;
 
 async function main(): Promise<void> {
@@ -55,8 +57,19 @@ async function main(): Promise<void> {
 
 	const options = parseArguments(args);
 
-	console.log(`Starting ${options.toolPath}…`);
+	if (options.stdio) redirectConsoleToStderr();
+	if (options.stdio) {
+		console.error(`Starting ${options.toolPath}…`);
+	} else {
+		console.log(`Starting ${options.toolPath}…`);
+	}
 	const compiled = await compileTool(options.toolPath);
+	if (options.stdio) {
+		await runToolStdio(compiled);
+		console.error("MCP: stdio");
+		return;
+	}
+
 	const running = await runTool(compiled, options);
 	console.log(`UI:  ${running.url}`);
 	console.log(`RPC: ${new URL("/.htmltool/rpc", running.url)}`);
@@ -71,15 +84,22 @@ function parseArguments(args: string[]): CliOptions {
 		hostname: "127.0.0.1",
 		port: 7331,
 		openBrowser: true,
+		stdio: false,
 	};
+	let networkOption: string | undefined;
 
 	for (let index = 0; index < args.length; index += 1) {
 		const argument = args[index];
 		if (argument === "--no-open") {
 			options.openBrowser = false;
+		} else if (argument === "--stdio") {
+			options.stdio = true;
+			options.openBrowser = false;
 		} else if (argument === "--host") {
+			networkOption = argument;
 			options.hostname = requiredValue(args, ++index, argument);
 		} else if (argument === "--port") {
+			networkOption = argument;
 			const value = Number(requiredValue(args, ++index, argument));
 			if (!Number.isInteger(value) || value < 0 || value > 65_535) {
 				throw new Error(`Invalid port: ${value}`);
@@ -100,6 +120,9 @@ function parseArguments(args: string[]): CliOptions {
 	if (!options.toolPath) {
 		throw new Error(help);
 	}
+	if (options.stdio && networkOption) {
+		throw new Error(`${networkOption} cannot be combined with --stdio`);
+	}
 	return options;
 }
 
@@ -107,6 +130,14 @@ function requiredValue(args: string[], index: number, option: string): string {
 	const value = args[index];
 	if (!value) throw new Error(`${option} requires a value`);
 	return value;
+}
+
+function redirectConsoleToStderr(): void {
+	const stderr = console.error.bind(console);
+	console.log = stderr;
+	console.info = stderr;
+	console.debug = stderr;
+	console.warn = stderr;
 }
 
 function openBrowser(url: URL): void {

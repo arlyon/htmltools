@@ -21,6 +21,38 @@ describe("parseTool", () => {
 		expect(parsed.browserHtml).toContain("/.htmltool/client.js");
 	});
 
+	test("extracts sorted embedded dependencies", () => {
+		const parsed = parseTool(`
+			<script type="application/htmltool+json">
+				{"name":"portable","dependencies":{"zod":"4.4.3","htmltool":"github:arlyon/htmltools#v0.3.0"}}
+			</script>
+			<script lang="ts" server>export default {}</script>
+			<script lang="ts" client>document.body.textContent = "ready"</script>
+		`);
+
+		expect(parsed.manifest.dependencies).toEqual({
+			htmltool: "github:arlyon/htmltools#v0.3.0",
+			zod: "4.4.3",
+		});
+	});
+
+	test("rejects invalid embedded dependencies", () => {
+		expect(() =>
+			parseTool(`
+				<script type="application/htmltool+json">{"name":"invalid","dependencies":[]}</script>
+				<script lang="ts" server></script>
+				<script lang="ts" client></script>
+			`),
+		).toThrow("manifest.dependencies must be a JSON object");
+		expect(() =>
+			parseTool(`
+				<script type="application/htmltool+json">{"name":"invalid","dependencies":{"pkg":"workspace:*"}}</script>
+				<script lang="ts" server></script>
+				<script lang="ts" client></script>
+			`),
+		).toThrow("cannot use workspace:");
+	});
+
 	test("extracts annotated MCP UI fragments without server scripts", () => {
 		const parsed = parseTool(`<!doctype html>
 			<html><head>

@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import {
+	mkdtemp,
+	mkdir,
+	readdir,
+	rm,
+	symlink,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compileUiDocuments } from "../src/compiler/compile-ui.ts";
@@ -82,6 +89,114 @@ document.body.dataset.marker = marker;
 		expect(await compiled.serverBundle.text()).toContain("tool-environment");
 		expect(await compiled.clientBundle.text()).toContain("tool-environment");
 		expect(existsSync(join(directory, ".htmltool"))).toBe(false);
+	});
+
+	test("skips installing unused embedded dependencies when bundling succeeds", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "htmltool-lazy-"));
+		temporaryDirectories.push(directory);
+		const cacheDirectory = join(directory, "cache");
+		const toolPath = join(directory, "index.html");
+		await writeFile(
+			toolPath,
+			`<!doctype html>
+			<script type="application/htmltool+json">${JSON.stringify({
+				name: "lazy-test",
+				dependencies: { "unused-package": "0.0.0" },
+			})}</script>
+			<script lang="ts" server>export default { ready: () => true };</script>
+			<script lang="ts" client>document.body.dataset.ready = "true";</script>`,
+		);
+
+		const previousCacheDirectory = process.env.HTMLTOOL_CACHE_DIR;
+		process.env.HTMLTOOL_CACHE_DIR = cacheDirectory;
+		try {
+			await expect(compileTool(toolPath)).resolves.toBeDefined();
+			expect(existsSync(cacheDirectory)).toBe(false);
+		} finally {
+			if (previousCacheDirectory === undefined) {
+				Reflect.deleteProperty(process.env, "HTMLTOOL_CACHE_DIR");
+			} else {
+				process.env.HTMLTOOL_CACHE_DIR = previousCacheDirectory;
+			}
+		}
+	});
+
+	test("installs embedded dependencies after a failed bundle and retries", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "htmltool-embedded-"));
+		temporaryDirectories.push(directory);
+		const dependencyDirectory = join(directory, "fixture-dependency");
+		const toolDirectory = join(directory, "tool");
+		const cacheDirectory = join(directory, "cache");
+		await mkdir(dependencyDirectory);
+		await mkdir(toolDirectory);
+		await writeFile(
+			join(dependencyDirectory, "package.json"),
+			JSON.stringify({
+				name: "embedded-fixture",
+				type: "module",
+				exports: {
+					".": {
+						types: "./index.d.ts",
+						browser: "./browser.js",
+						bun: "./bun.js",
+						default: "./index.js",
+					},
+				},
+			}),
+		);
+		await writeFile(
+			join(dependencyDirectory, "index.d.ts"),
+			'export declare const marker: "embedded-environment";\n',
+		);
+		await writeFile(
+			join(dependencyDirectory, "index.js"),
+			'export const marker = "embedded-default";\n',
+		);
+		await writeFile(
+			join(dependencyDirectory, "browser.js"),
+			'export const marker = "embedded-browser";\n',
+		);
+		await writeFile(
+			join(dependencyDirectory, "bun.js"),
+			'export const marker = "embedded-bun";\n',
+		);
+		const toolPath = join(toolDirectory, "index.html");
+		await writeFile(
+			toolPath,
+			`<!doctype html>
+			<script type="application/htmltool+json">${JSON.stringify({
+				name: "embedded-test",
+				dependencies: { "embedded-fixture": `file:${dependencyDirectory}` },
+			})}</script>
+			<script lang="ts" server>
+			import { marker } from "embedded-fixture";
+			export default { readMarker: () => marker };
+			</script>
+			<script lang="ts" client>
+			import { marker } from "embedded-fixture";
+			document.body.dataset.marker = marker;
+			</script>`,
+		);
+
+		const previousCacheDirectory = process.env.HTMLTOOL_CACHE_DIR;
+		process.env.HTMLTOOL_CACHE_DIR = cacheDirectory;
+		try {
+			const compiled = await compileTool(toolPath);
+			const serverBundle = await compiled.serverBundle.text();
+			const clientBundle = await compiled.clientBundle.text();
+			expect(serverBundle).toContain("embedded-bun");
+			expect(clientBundle).toContain("embedded-browser");
+			await expect(checkTool(toolPath)).resolves.toBeUndefined();
+			expect(await readdir(join(cacheDirectory, "environments"))).toHaveLength(
+				1,
+			);
+		} finally {
+			if (previousCacheDirectory === undefined) {
+				Reflect.deleteProperty(process.env, "HTMLTOOL_CACHE_DIR");
+			} else {
+				process.env.HTMLTOOL_CACHE_DIR = previousCacheDirectory;
+			}
+		}
 	});
 
 	test("packages annotated fragments as MCP App documents", async () => {

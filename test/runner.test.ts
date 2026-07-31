@@ -1,13 +1,20 @@
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { PassThrough } from "node:stream";
 import SuperJSON from "superjson";
-import { compileTool } from "../src/compiler/compile-tool.ts";
-import { runTool, type RunningTool } from "../src/runner.ts";
+import { checkTool, compileTool } from "../src/compiler/compile-tool.ts";
+import {
+	runTool,
+	runToolStdio,
+	type RunningStdioTool,
+	type RunningTool,
+} from "../src/runner.ts";
 import { HTMLTOOL_APP_CLOSE_METHOD } from "../src/runtime/app-protocol.ts";
 
 const temporaryDirectories: string[] = [];
 const runningTools: RunningTool[] = [];
+const runningStdioTools: RunningStdioTool[] = [];
 setDefaultTimeout(60_000);
 const APP_ID = "00000000-0000-4000-8000-000000000001";
 
@@ -32,6 +39,7 @@ interface NamedValue extends Record<string, unknown> {
 
 afterEach(async () => {
 	for (const tool of runningTools.splice(0)) tool.stop();
+	await Promise.all(runningStdioTools.splice(0).map((tool) => tool.stop()));
 	await Promise.all(
 		temporaryDirectories
 			.splice(0)
@@ -113,6 +121,72 @@ describe("MCP Apps", () => {
 		).rejects.toThrow("Unknown HTMLTool RPC method");
 	});
 
+	test("serves embedded-package tools and MCP App resources over stdio", async () => {
+		const toolPath = await writeTool(
+			'<inspect-view data-htmltool-ui="inspect"><output>Waiting</output></inspect-view>',
+			{ dependencies: { htmltool: `file:${process.cwd()}` } },
+		);
+		const previousCacheDirectory = process.env.HTMLTOOL_CACHE_DIR;
+		process.env.HTMLTOOL_CACHE_DIR = join(dirname(toolPath), "cache");
+		let compiled: Awaited<ReturnType<typeof compileTool>>;
+		try {
+			await checkTool(toolPath);
+			compiled = await compileTool(toolPath);
+		} finally {
+			if (previousCacheDirectory === undefined) {
+				Reflect.deleteProperty(process.env, "HTMLTOOL_CACHE_DIR");
+			} else {
+				process.env.HTMLTOOL_CACHE_DIR = previousCacheDirectory;
+			}
+		}
+		const input = new PassThrough();
+		const output = new PassThrough();
+		const client = createStdioClient(input, output);
+		const running = await runToolStdio(compiled, {
+			stdin: input,
+			stdout: output,
+		});
+		runningStdioTools.push(running);
+
+		await client.request("initialize", {
+			protocolVersion: "2025-06-18",
+			capabilities: {},
+			clientInfo: { name: "htmltool-stdio-test", version: "1.0.0" },
+		});
+		const tools = await client.request<McpToolsResult>("tools/list", {});
+		expect(findByName(tools.tools, "inspect")._meta).toEqual({
+			ui: { resourceUri: "ui://htmltool/runner-test/inspect.html" },
+		});
+		const resource = await client.request<McpResourceResult>("resources/read", {
+			uri: "ui://htmltool/runner-test/inspect.html",
+		});
+		expect(resource.contents[0]?.mimeType).toBe("text/html;profile=mcp-app");
+		expect(resource.contents[0]?.text).toContain(
+			'<inspect-view data-htmltool-ui="inspect"><output>Waiting</output></inspect-view>',
+		);
+		const toolResult = await client.request<McpToolResult>("tools/call", {
+			name: "inspect",
+			arguments: { value: "stdio" },
+		});
+		expect(toolResult.structuredContent).toEqual({ value: "STDIO" });
+		const bridgeResult = await client.request<McpToolResult>("tools/call", {
+			name: "htmltool_rpc",
+			arguments: {
+				payload: SuperJSON.stringify({
+					appId: APP_ID,
+					method: "echoRpc",
+					args: [{ value: "app-stdio" }],
+				}),
+			},
+		});
+		const bridgePayload = bridgeResult.structuredContent?.payload;
+		if (typeof bridgePayload !== "string") {
+			throw new TypeError("Missing stdio bridge payload");
+		}
+		const bridgeOutput: unknown = SuperJSON.parse(bridgePayload);
+		expect(bridgeOutput).toEqual({ value: "app-stdio" });
+	});
+
 	test("reserves the internal app RPC tool name", async () => {
 		const toolPath = await writeTool(
 			'<inspect-view data-htmltool-ui="inspect">Inspect</inspect-view>',
@@ -140,9 +214,78 @@ describe("MCP Apps", () => {
 	});
 });
 
+function createStdioClient(
+	input: PassThrough,
+	output: PassThrough,
+): {
+	request<Result>(method: string, params: unknown): Promise<Result>;
+} {
+	let nextId = 1;
+	let buffered = "";
+	const pending = new Map<
+		number,
+		{ resolve(value: unknown): void; reject(error: Error): void }
+	>();
+	output.setEncoding("utf8");
+	output.on("data", (chunk: string) => {
+		buffered += chunk;
+		let newline = buffered.indexOf("\n");
+		while (newline >= 0) {
+			const line = buffered.slice(0, newline);
+			buffered = buffered.slice(newline + 1);
+			if (line) {
+				let message: {
+					id?: number;
+					result?: unknown;
+					error?: { message?: string };
+				};
+				try {
+					message = JSON.parse(line) as typeof message;
+				} catch (error) {
+					const parseError = new Error("Invalid MCP stdio response", {
+						cause: error,
+					});
+					for (const waiter of pending.values()) waiter.reject(parseError);
+					pending.clear();
+					continue;
+				}
+				if (message.id !== undefined) {
+					const waiter = pending.get(message.id);
+					pending.delete(message.id);
+					if (message.error) {
+						waiter?.reject(new Error(message.error.message ?? "MCP error"));
+					} else {
+						waiter?.resolve(message.result);
+					}
+				}
+			}
+			newline = buffered.indexOf("\n");
+		}
+	});
+	return {
+		request<Result>(method: string, params: unknown): Promise<Result> {
+			const id = nextId++;
+			const result = new Promise<Result>((resolve, reject) => {
+				pending.set(id, {
+					resolve: (value) => resolve(value as Result),
+					reject,
+				});
+			});
+			input.write(
+				`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`,
+			);
+			return result;
+		},
+	};
+}
+
 async function writeTool(
 	body: string,
-	extra: { contract?: string; definition?: string } = {},
+	extra: {
+		contract?: string;
+		definition?: string;
+		dependencies?: Record<string, string>;
+	} = {},
 ): Promise<string> {
 	const directory = await mkdtemp(join(process.cwd(), ".htmltool-runner-"));
 	temporaryDirectories.push(directory);
@@ -151,7 +294,10 @@ async function writeTool(
 		toolPath,
 		`<!doctype html>
 		<html><head>
-		<script type="application/htmltool+json">{"name":"runner-test"}</script>
+		<script type="application/htmltool+json">${JSON.stringify({
+			name: "runner-test",
+			...(extra.dependencies ? { dependencies: extra.dependencies } : {}),
+		})}</script>
 		<script lang="ts" common>
 		interface Server {
 			inspect(input: { value: string }): { value: string };

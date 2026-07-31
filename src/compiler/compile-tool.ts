@@ -2,6 +2,12 @@ import { dirname, join, resolve } from "node:path";
 import type { BuildArtifact } from "bun";
 import ts from "typescript";
 import { compileUiDocuments, type CompiledUi } from "./compile-ui.ts";
+import {
+	installPackageEnvironment,
+	isPackageEnvironmentReady,
+	resolvePackageEnvironment,
+	type PackageEnvironment,
+} from "./package-environment.ts";
 import { parseTool, type BlockRole, type ParsedTool } from "./parse-tool.ts";
 
 export type { CompiledUi } from "./compile-ui.ts";
@@ -22,6 +28,7 @@ interface VirtualEntrypoint {
 interface PreparedTool {
 	parsed: ParsedTool;
 	toolDirectory: string;
+	packageEnvironment?: PackageEnvironment;
 	client: VirtualEntrypoint;
 	appClient?: VirtualEntrypoint;
 	server: VirtualEntrypoint;
@@ -29,16 +36,25 @@ interface PreparedTool {
 
 export async function compileTool(toolPath: string): Promise<CompiledTool> {
 	const prepared = await prepareTool(toolPath);
-	const [serverBundle, clientBundle, appClientBundle] = await Promise.all([
-		bundleEntrypoint(prepared.server, "bun"),
-		bundleEntrypoint(prepared.client, "browser"),
-		prepared.appClient
-			? bundleEntrypoint(prepared.appClient, "browser", {
-					minify: true,
-					sourcemap: "none",
-				})
-			: undefined,
-	]);
+	try {
+		return await compilePreparedTool(prepared);
+	} catch (error) {
+		if (
+			!prepared.packageEnvironment ||
+			isPackageEnvironmentReady(prepared.packageEnvironment)
+		) {
+			throw error;
+		}
+		await installPackageEnvironment(prepared.packageEnvironment);
+		return compilePreparedTool(await prepareTool(toolPath));
+	}
+}
+
+async function compilePreparedTool(
+	prepared: PreparedTool,
+): Promise<CompiledTool> {
+	const [serverBundle, clientBundle, appClientBundle] =
+		await bundleEntrypoints(prepared);
 	const ui = appClientBundle
 		? await compileUiDocuments(
 				prepared.parsed,
@@ -55,11 +71,44 @@ export async function compileTool(toolPath: string): Promise<CompiledTool> {
 	};
 }
 
+type BundledEntrypoints = [
+	server: BuildArtifact,
+	client: BuildArtifact,
+	appClient: BuildArtifact | undefined,
+];
+
+async function bundleEntrypoints(
+	prepared: PreparedTool,
+): Promise<BundledEntrypoints> {
+	const [server, client, appClient] = await Promise.allSettled([
+		bundleEntrypoint(prepared.server, "bun"),
+		bundleEntrypoint(prepared.client, "browser"),
+		prepared.appClient
+			? bundleEntrypoint(prepared.appClient, "browser", {
+					minify: true,
+					sourcemap: "none",
+				})
+			: Promise.resolve(undefined),
+	]);
+	if (server.status === "rejected") throw server.reason;
+	if (client.status === "rejected") throw client.reason;
+	if (appClient.status === "rejected") throw appClient.reason;
+	return [server.value, client.value, appClient.value];
+}
+
 export async function checkTool(toolPath: string): Promise<void> {
-	const prepared = await prepareTool(toolPath);
+	let prepared = await prepareTool(toolPath);
+	if (
+		prepared.packageEnvironment &&
+		!isPackageEnvironmentReady(prepared.packageEnvironment)
+	) {
+		await installPackageEnvironment(prepared.packageEnvironment);
+		prepared = await prepareTool(toolPath);
+	}
 	typecheckEntrypoints(
 		[prepared.server, prepared.client],
 		prepared.toolDirectory,
+		prepared.packageEnvironment,
 	);
 }
 
@@ -67,7 +116,15 @@ async function prepareTool(toolPath: string): Promise<PreparedTool> {
 	const absoluteToolPath = resolve(toolPath);
 	const toolDirectory = dirname(absoluteToolPath);
 	const parsed = parseTool(await Bun.file(absoluteToolPath).text());
+	const packageEnvironment = resolvePackageEnvironment(
+		parsed.manifest,
+		toolDirectory,
+	);
 	const safeName = parsed.manifest.name.replace(/[^a-zA-Z0-9._-]/g, "-");
+	const entrypointDirectory =
+		packageEnvironment && isPackageEnvironmentReady(packageEnvironment)
+			? packageEnvironment.directory
+			: toolDirectory;
 	const commonSource = blockSource(parsed, "common");
 
 	const clientSource = [commonSource, blockSource(parsed, "client")].join(
@@ -76,22 +133,23 @@ async function prepareTool(toolPath: string): Promise<PreparedTool> {
 	return {
 		parsed,
 		toolDirectory,
+		packageEnvironment,
 		server: {
-			path: join(toolDirectory, `.htmltool-${safeName}.server.ts`),
+			path: join(entrypointDirectory, `.htmltool-${safeName}.server.ts`),
 			source: [commonSource, blockSource(parsed, "server")].join("\n\n"),
 		},
 		client: {
-			path: join(toolDirectory, `.htmltool-${safeName}.client.ts`),
+			path: join(entrypointDirectory, `.htmltool-${safeName}.client.ts`),
 			source: clientSource,
 		},
 		appClient:
 			parsed.ui.length === 0
 				? undefined
 				: {
-						path: join(toolDirectory, `.htmltool-${safeName}.app.ts`),
+						path: join(entrypointDirectory, `.htmltool-${safeName}.app.ts`),
 						source: [
 							'import { startMcpApp as __htmltoolStartMcpApp } from "htmltool/mcp-app";',
-							`__htmltoolStartMcpApp(${JSON.stringify({ name: parsed.manifest.name, version: "0.2.0" })});`,
+							`__htmltoolStartMcpApp(${JSON.stringify({ name: parsed.manifest.name, version: "0.3.0" })});`,
 							clientSource,
 						].join("\n\n"),
 					},
@@ -108,8 +166,19 @@ function blockSource(parsed: ParsedTool, role: BlockRole): string {
 function typecheckEntrypoints(
 	entrypoints: VirtualEntrypoint[],
 	toolDirectory: string,
+	packageEnvironment?: PackageEnvironment,
 ): void {
 	const compilerOptions = loadCompilerOptions(toolDirectory);
+	if (packageEnvironment) {
+		const existingTypeRoots =
+			ts.getEffectiveTypeRoots(compilerOptions, {
+				getCurrentDirectory: () => toolDirectory,
+			}) ?? [];
+		compilerOptions.typeRoots = [
+			join(packageEnvironment.nodeModulesDirectory, "@types"),
+			...existingTypeRoots,
+		];
+	}
 	const sources = new Map(
 		entrypoints.map((entrypoint) => [entrypoint.path, entrypoint.source]),
 	);

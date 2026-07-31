@@ -16,6 +16,7 @@ export interface ToolBlock extends SourceRange {
 
 export interface ToolManifest {
 	name: string;
+	dependencies?: Record<string, string>;
 }
 
 export interface ToolUi extends SourceRange {
@@ -261,7 +262,39 @@ function parseManifest(source: string): ToolManifest {
 	if (typeof candidate.name !== "string" || candidate.name.trim() === "") {
 		throw new Error("manifest.name must be a non-empty string");
 	}
-	return { name: candidate.name };
+	const dependencies = parseDependencies(candidate.dependencies);
+	return {
+		name: candidate.name,
+		...(dependencies ? { dependencies } : {}),
+	};
+}
+
+function parseDependencies(value: unknown): Record<string, string> | undefined {
+	if (value === undefined) return undefined;
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new Error("manifest.dependencies must be a JSON object");
+	}
+	const dependencies = Object.entries(value).sort(([left], [right]) =>
+		left.localeCompare(right),
+	);
+	for (const [name, specification] of dependencies) {
+		if (name.trim() === "") {
+			throw new Error("manifest dependency names must be non-empty");
+		}
+		if (typeof specification !== "string" || specification.trim() === "") {
+			throw new Error(
+				`manifest dependency ${JSON.stringify(name)} must have a non-empty string specification`,
+			);
+		}
+		if (specification.startsWith("workspace:")) {
+			throw new Error(
+				`manifest dependency ${JSON.stringify(name)} cannot use workspace: from the HTMLTool cache`,
+			);
+		}
+	}
+	return dependencies.length === 0
+		? undefined
+		: Object.fromEntries(dependencies);
 }
 
 function walk(
