@@ -367,339 +367,395 @@
     <script lang="ts" client>
       import { createClient } from "htmltool/client";
 
-      const client = createClient<Server>();
-      const state = {
-        snapshot: null as LoopSnapshot | null,
-        focus: "All",
-        status: "open",
-        query: "",
-      };
-      let loadVersion = 0;
+      class OpenLoopsElement extends HTMLElement {
+        #abort?: AbortController;
 
-      const tableBody =
-        document.querySelector<HTMLTableSectionElement>("#loops-body")!;
-      const table = document.querySelector<HTMLElement>(".table-scroll")!;
-      const empty = document.querySelector<HTMLElement>("#empty")!;
-      const error = document.querySelector<HTMLElement>("#error")!;
-      const filters = document.querySelector<HTMLElement>("#focus-filters")!;
-      const search = document.querySelector<HTMLInputElement>("#search")!;
-      const refresh = document.querySelector<HTMLButtonElement>("#refresh")!;
-
-      refresh.addEventListener("click", () => load());
-      search.addEventListener("input", () => {
-        state.query = search.value.trim().toLowerCase();
-        render();
-      });
-      document.addEventListener("keydown", (event) => {
-        if (event.key === "/" && document.activeElement !== search) {
-          event.preventDefault();
-          search.focus();
+        connectedCallback(): void {
+          if (this.#abort) return;
+          this.#abort = new AbortController();
+          mountOpenLoops(this, this.#abort.signal);
         }
-        if (event.key === "r" && (event.metaKey || event.ctrlKey)) {
-          event.preventDefault();
-          load();
-        }
-      });
 
-      await load();
-
-      async function load(): Promise<void> {
-        const version = ++loadVersion;
-        refresh.disabled = true;
-        refresh.setAttribute("aria-label", "Refreshing open loops");
-        table.setAttribute("aria-busy", "true");
-        error.hidden = true;
-        empty.hidden = true;
-        state.snapshot = {
-          vault: "Vault",
-          scannedNotes: 0,
-          generatedAt: new Date().toISOString(),
-          loops: [],
-        };
-        try {
-          for await (const event of client.streamLoops({
-            includeDone: false,
-          })) {
-            if (version !== loadVersion) break;
-            if (event.type === "started") {
-              state.snapshot.vault = event.vault;
-              document.querySelector("#vault-name")!.textContent = event.vault;
-            } else if (event.type === "loop") {
-              state.snapshot.loops.push(event.loop);
-              if (state.snapshot.loops.length % 5 === 0) render();
-            } else {
-              state.snapshot.scannedNotes = event.scannedNotes;
-              state.snapshot.generatedAt = event.generatedAt;
-            }
-          }
-          renderFilters();
-          render();
-        } catch (cause) {
-          table.hidden = true;
-          empty.hidden = true;
-          error.hidden = false;
-          error.querySelector("p")!.textContent =
-            cause instanceof Error ? cause.message : String(cause);
-        } finally {
-          table.setAttribute("aria-busy", "false");
-          refresh.disabled = false;
-          refresh.setAttribute("aria-label", "Refresh open loops");
+        disconnectedCallback(): void {
+          this.#abort?.abort();
+          this.#abort = undefined;
         }
       }
 
-      function renderFilters(): void {
-        const loops = state.snapshot?.loops ?? [];
-        const focuses = ["All", ...new Set(loops.map((loop) => loop.focus))];
-        const buttons = focuses.map((focus) => {
-          const button = element("button", "filter", focus);
-          button.type = "button";
-          button.dataset.focus = focus;
-          button.setAttribute("aria-pressed", String(focus === state.focus));
-          button.addEventListener("click", () => {
-            state.focus = focus;
+      customElements.define("open-loops", OpenLoopsElement);
+
+      function mountOpenLoops(root: HTMLElement, signal: AbortSignal): void {
+        const client = createClient<Server>();
+        const state = {
+          snapshot: null as LoopSnapshot | null,
+          focus: "All",
+          status: "open",
+          query: "",
+        };
+        let loadVersion = 0;
+
+        const tableBody =
+          root.querySelector<HTMLTableSectionElement>("#loops-body")!;
+        const table = root.querySelector<HTMLElement>(".table-scroll")!;
+        const empty = root.querySelector<HTMLElement>("#empty")!;
+        const error = root.querySelector<HTMLElement>("#error")!;
+        const filters = root.querySelector<HTMLElement>("#focus-filters")!;
+        const search = root.querySelector<HTMLInputElement>("#search")!;
+        const refresh = root.querySelector<HTMLButtonElement>("#refresh")!;
+
+        refresh.addEventListener("click", () => load(), { signal });
+        search.addEventListener(
+          "input",
+          () => {
+            state.query = search.value.trim().toLowerCase();
+            render();
+          },
+          { signal },
+        );
+        document.addEventListener(
+          "keydown",
+          (event) => {
+            if (event.key === "/" && document.activeElement !== search) {
+              event.preventDefault();
+              search.focus();
+            }
+            if (event.key === "r" && (event.metaKey || event.ctrlKey)) {
+              event.preventDefault();
+              load();
+            }
+          },
+          { signal },
+        );
+
+        if (document.documentElement.hasAttribute("data-htmltool-mcp-app")) {
+          root.addEventListener(
+            "htmltool:result",
+            (event) => {
+              const result = (
+                event as CustomEvent<{
+                  structuredContent?: unknown;
+                  isError?: boolean;
+                }>
+              ).detail;
+              if (result.isError || !result.structuredContent) {
+                table.hidden = true;
+                empty.hidden = true;
+                error.hidden = false;
+                error.querySelector("p")!.textContent =
+                  "The MCP tool call failed";
+                return;
+              }
+              state.snapshot = result.structuredContent as LoopSnapshot;
+              renderFilters();
+              render();
+              table.setAttribute("aria-busy", "false");
+            },
+            { signal },
+          );
+        } else {
+          void load();
+        }
+
+        async function load(): Promise<void> {
+          const version = ++loadVersion;
+          refresh.disabled = true;
+          refresh.setAttribute("aria-label", "Refreshing open loops");
+          table.setAttribute("aria-busy", "true");
+          error.hidden = true;
+          empty.hidden = true;
+          state.snapshot = {
+            vault: "Vault",
+            scannedNotes: 0,
+            generatedAt: new Date().toISOString(),
+            loops: [],
+          };
+          try {
+            for await (const event of client.streamLoops({
+              includeDone: false,
+            })) {
+              if (version !== loadVersion || signal.aborted) break;
+              if (event.type === "started") {
+                state.snapshot.vault = event.vault;
+                root.querySelector("#vault-name")!.textContent = event.vault;
+              } else if (event.type === "loop") {
+                state.snapshot.loops.push(event.loop);
+                if (state.snapshot.loops.length % 5 === 0) render();
+              } else {
+                state.snapshot.scannedNotes = event.scannedNotes;
+                state.snapshot.generatedAt = event.generatedAt;
+              }
+            }
             renderFilters();
             render();
+          } catch (cause) {
+            table.hidden = true;
+            empty.hidden = true;
+            error.hidden = false;
+            error.querySelector("p")!.textContent =
+              cause instanceof Error ? cause.message : String(cause);
+          } finally {
+            table.setAttribute("aria-busy", "false");
+            refresh.disabled = false;
+            refresh.setAttribute("aria-label", "Refresh open loops");
+          }
+        }
+
+        function renderFilters(): void {
+          const loops = state.snapshot?.loops ?? [];
+          const focuses = ["All", ...new Set(loops.map((loop) => loop.focus))];
+          const buttons = focuses.map((focus) => {
+            const button = element("button", "filter", focus);
+            button.type = "button";
+            button.dataset.focus = focus;
+            button.setAttribute("aria-pressed", String(focus === state.focus));
+            button.addEventListener("click", () => {
+              state.focus = focus;
+              renderFilters();
+              render();
+            });
+            return button;
           });
-          return button;
-        });
-        filters.replaceChildren(...buttons);
-      }
-
-      function render(): void {
-        const snapshot = state.snapshot;
-        if (!snapshot) return;
-        const loops = snapshot.loops.filter((loop) => {
-          const inFocus = state.focus === "All" || loop.focus === state.focus;
-          const haystack = [
-            loop.title,
-            loop.nextAction,
-            loop.waitingOn,
-            loop.sourcePath,
-          ]
-            .join(" ")
-            .toLowerCase();
-          return inFocus && (!state.query || haystack.includes(state.query));
-        });
-
-        document.querySelector("#loop-count")!.textContent = String(
-          loops.length,
-        );
-        document.querySelector("#note-count")!.textContent = String(
-          snapshot.scannedNotes,
-        );
-        document.querySelector("#vault-name")!.textContent = snapshot.vault;
-        document.querySelector("#updated")!.textContent = formatTime(
-          snapshot.generatedAt,
-        );
-
-        table.hidden = loops.length === 0;
-        empty.hidden = loops.length !== 0;
-        if (loops.length === 0) {
-          tableBody.replaceChildren();
-          return;
+          filters.replaceChildren(...buttons);
         }
 
-        const content = document.createDocumentFragment();
-        const groups = new Map<string, OpenLoop[]>();
-        for (const loop of loops) {
-          const group = groups.get(loop.focus) ?? [];
-          group.push(loop);
-          groups.set(loop.focus, group);
+        function render(): void {
+          const snapshot = state.snapshot;
+          if (!snapshot) return;
+          const loops = snapshot.loops.filter((loop) => {
+            const inFocus = state.focus === "All" || loop.focus === state.focus;
+            const haystack = [
+              loop.title,
+              loop.nextAction,
+              loop.waitingOn,
+              loop.sourcePath,
+            ]
+              .join(" ")
+              .toLowerCase();
+            return inFocus && (!state.query || haystack.includes(state.query));
+          });
+
+          root.querySelector("#loop-count")!.textContent = String(loops.length);
+          root.querySelector("#note-count")!.textContent = String(
+            snapshot.scannedNotes,
+          );
+          root.querySelector("#vault-name")!.textContent = snapshot.vault;
+          root.querySelector("#updated")!.textContent = formatTime(
+            snapshot.generatedAt,
+          );
+
+          table.hidden = loops.length === 0;
+          empty.hidden = loops.length !== 0;
+          if (loops.length === 0) {
+            tableBody.replaceChildren();
+            return;
+          }
+
+          const content = document.createDocumentFragment();
+          const groups = new Map<string, OpenLoop[]>();
+          for (const loop of loops) {
+            const group = groups.get(loop.focus) ?? [];
+            group.push(loop);
+            groups.set(loop.focus, group);
+          }
+          for (const [focus, group] of groups) {
+            content.append(groupRow(focus, group.length));
+            for (const loop of group) content.append(loopRow(loop));
+          }
+          tableBody.replaceChildren(content);
         }
-        for (const [focus, group] of groups) {
-          content.append(groupRow(focus, group.length));
-          for (const loop of group) content.append(loopRow(loop));
+
+        function groupRow(focus: string, count: number): HTMLTableRowElement {
+          const row = element("tr", "group-row");
+          const heading = element("th");
+          heading.colSpan = 6;
+          heading.scope = "rowgroup";
+          const label = element("span", "group-heading", focus);
+          label.append(" ", element("span", "group-count", String(count)));
+          heading.append(label);
+          row.append(heading);
+          return row;
         }
-        tableBody.replaceChildren(content);
-      }
 
-      function groupRow(focus: string, count: number): HTMLTableRowElement {
-        const row = element("tr", "group-row");
-        const heading = element("th");
-        heading.colSpan = 6;
-        heading.scope = "rowgroup";
-        const label = element("span", "group-heading", focus);
-        label.append(" ", element("span", "group-count", String(count)));
-        heading.append(label);
-        row.append(heading);
-        return row;
-      }
+        function loopRow(loop: OpenLoop): HTMLTableRowElement {
+          const row = element("tr");
+          const nameCell = element("td");
+          const link = element("a", "loop-link");
+          link.href = loop.sourceUri;
+          link.title = `Open ${loop.sourcePath} in Obsidian`;
+          const icon = element("span", "note-icon", "▤");
+          icon.setAttribute("aria-hidden", "true");
+          link.append(icon, element("span", "", loop.title));
+          nameCell.append(link);
 
-      function loopRow(loop: OpenLoop): HTMLTableRowElement {
-        const row = element("tr");
-        const nameCell = element("td");
-        const link = element("a", "loop-link");
-        link.href = loop.sourceUri;
-        link.title = `Open ${loop.sourcePath} in Obsidian`;
-        const icon = element("span", "note-icon", "▤");
-        icon.setAttribute("aria-hidden", "true");
-        link.append(icon, element("span", "", loop.title));
-        nameCell.append(link);
+          const nextAction = element(
+            "td",
+            "field",
+            loop.nextAction ?? "No next action",
+          );
+          if (!loop.nextAction) nextAction.classList.add("missing");
+          const waitingOn = element(
+            "td",
+            "field",
+            loop.waitingOn ?? "Not waiting",
+          );
+          if (!loop.waitingOn) waitingOn.classList.add("missing");
+          const deadline = element("td", "deadline", loop.deadline ?? "");
+          if (loop.deadline && loop.deadline < today())
+            deadline.classList.add("overdue");
 
-        const nextAction = element(
-          "td",
-          "field",
-          loop.nextAction ?? "No next action",
-        );
-        if (!loop.nextAction) nextAction.classList.add("missing");
-        const waitingOn = element(
-          "td",
-          "field",
-          loop.waitingOn ?? "Not waiting",
-        );
-        if (!loop.waitingOn) waitingOn.classList.add("missing");
-        const deadline = element("td", "deadline", loop.deadline ?? "");
-        if (loop.deadline && loop.deadline < today())
-          deadline.classList.add("overdue");
+          const priorityCell = element("td");
+          const priority = element(
+            "span",
+            "priority",
+            loop.priority === null ? "" : `P${loop.priority}`,
+          );
+          priority.dataset.priority =
+            loop.priority === null ? "" : String(loop.priority);
+          priorityCell.append(priority);
 
-        const priorityCell = element("td");
-        const priority = element(
-          "span",
-          "priority",
-          loop.priority === null ? "" : `P${loop.priority}`,
-        );
-        priority.dataset.priority =
-          loop.priority === null ? "" : String(loop.priority);
-        priorityCell.append(priority);
+          const statusCell = element("td");
+          const status = element("span", "status", loop.status);
+          status.dataset.status = loop.status;
+          statusCell.append(status);
 
-        const statusCell = element("td");
-        const status = element("span", "status", loop.status);
-        status.dataset.status = loop.status;
-        statusCell.append(status);
+          row.append(
+            nameCell,
+            nextAction,
+            waitingOn,
+            deadline,
+            priorityCell,
+            statusCell,
+          );
+          return row;
+        }
 
-        row.append(
-          nameCell,
-          nextAction,
-          waitingOn,
-          deadline,
-          priorityCell,
-          statusCell,
-        );
-        return row;
-      }
+        function element<K extends keyof HTMLElementTagNameMap>(
+          tag: K,
+          className = "",
+          text = "",
+        ): HTMLElementTagNameMap[K] {
+          const node = document.createElement(tag);
+          if (className) node.className = className;
+          if (text) node.textContent = text;
+          return node;
+        }
 
-      function element<K extends keyof HTMLElementTagNameMap>(
-        tag: K,
-        className = "",
-        text = "",
-      ): HTMLElementTagNameMap[K] {
-        const node = document.createElement(tag);
-        if (className) node.className = className;
-        if (text) node.textContent = text;
-        return node;
-      }
+        function formatTime(value: string): string {
+          return new Intl.DateTimeFormat(undefined, {
+            hour: "2-digit",
+            minute: "2-digit",
+          }).format(new Date(value));
+        }
 
-      function formatTime(value: string): string {
-        return new Intl.DateTimeFormat(undefined, {
-          hour: "2-digit",
-          minute: "2-digit",
-        }).format(new Date(value));
-      }
-
-      function today(): string {
-        return new Date().toISOString().slice(0, 10);
+        function today(): string {
+          return new Date().toISOString().slice(0, 10);
+        }
       }
     </script>
   </head>
   <body>
-    <header class="app-header">
-      <div class="title-row">
-        <span class="mark" aria-hidden="true">↻</span>
-        <h1>Open Loops</h1>
-        <div class="summary" aria-live="polite">
-          <span><strong id="loop-count">0</strong> loops</span>
-          <span>·</span>
-          <span><strong id="note-count">0</strong> notes</span>
-          <span>·</span>
-          <span id="vault-name">Vault</span>
-          <span>·</span>
-          <span>Updated <span id="updated">now</span></span>
+    <open-loops class="app-shell" data-htmltool-ui="listLoops">
+      <header class="app-header">
+        <div class="title-row">
+          <span class="mark" aria-hidden="true">↻</span>
+          <h1>Open Loops</h1>
+          <div class="summary" aria-live="polite">
+            <span><strong id="loop-count">0</strong> loops</span>
+            <span>·</span>
+            <span><strong id="note-count">0</strong> notes</span>
+            <span>·</span>
+            <span id="vault-name">Vault</span>
+            <span>·</span>
+            <span>Updated <span id="updated">now</span></span>
+          </div>
         </div>
-      </div>
-      <nav class="toolbar" aria-label="Open loop filters">
-        <div id="focus-filters" class="toolbar" aria-label="Focus areas">
-          <button class="filter" type="button" aria-pressed="true">All</button>
+        <nav class="toolbar" aria-label="Open loop filters">
+          <div id="focus-filters" class="toolbar" aria-label="Focus areas">
+            <button class="filter" type="button" aria-pressed="true">
+              All
+            </button>
+          </div>
+          <span class="toolbar-spacer"></span>
+          <label class="search-wrap">
+            <span aria-hidden="true">⌕</span>
+            <span class="sr-only">Search open loops</span>
+            <input
+              id="search"
+              type="search"
+              placeholder="Search  /"
+              autocomplete="off"
+            />
+          </label>
+          <button
+            id="refresh"
+            class="icon-button"
+            type="button"
+            aria-label="Refresh open loops"
+            title="Refresh (Ctrl+R)"
+          >
+            ↻
+          </button>
+        </nav>
+      </header>
+
+      <main>
+        <div class="table-scroll" aria-busy="true">
+          <table class="loops-table">
+            <caption class="sr-only">
+              Open loops grouped by focus area
+            </caption>
+            <colgroup>
+              <col />
+              <col />
+              <col />
+              <col />
+              <col />
+              <col />
+            </colgroup>
+            <thead>
+              <tr>
+                <th scope="col">Name</th>
+                <th scope="col">Next action</th>
+                <th scope="col">Waiting on</th>
+                <th scope="col">Deadline / Event</th>
+                <th scope="col">Priority</th>
+                <th scope="col">Status</th>
+              </tr>
+            </thead>
+            <tbody id="loops-body">
+              <tr>
+                <td><span class="skeleton"></span></td>
+                <td><span class="skeleton"></span></td>
+                <td><span class="skeleton"></span></td>
+                <td></td>
+                <td></td>
+                <td><span class="skeleton"></span></td>
+              </tr>
+              <tr>
+                <td><span class="skeleton"></span></td>
+                <td><span class="skeleton"></span></td>
+                <td><span class="skeleton"></span></td>
+                <td></td>
+                <td></td>
+                <td><span class="skeleton"></span></td>
+              </tr>
+            </tbody>
+          </table>
         </div>
-        <span class="toolbar-spacer"></span>
-        <label class="search-wrap">
-          <span aria-hidden="true">⌕</span>
-          <span class="sr-only">Search open loops</span>
-          <input
-            id="search"
-            type="search"
-            placeholder="Search  /"
-            autocomplete="off"
-          />
-        </label>
-        <button
-          id="refresh"
-          class="icon-button"
-          type="button"
-          aria-label="Refresh open loops"
-          title="Refresh (Ctrl+R)"
-        >
-          ↻
-        </button>
-      </nav>
-    </header>
 
-    <main>
-      <div class="table-scroll" aria-busy="true">
-        <table class="loops-table">
-          <caption class="sr-only">
-            Open loops grouped by focus area
-          </caption>
-          <colgroup>
-            <col />
-            <col />
-            <col />
-            <col />
-            <col />
-            <col />
-          </colgroup>
-          <thead>
-            <tr>
-              <th scope="col">Name</th>
-              <th scope="col">Next action</th>
-              <th scope="col">Waiting on</th>
-              <th scope="col">Deadline / Event</th>
-              <th scope="col">Priority</th>
-              <th scope="col">Status</th>
-            </tr>
-          </thead>
-          <tbody id="loops-body">
-            <tr>
-              <td><span class="skeleton"></span></td>
-              <td><span class="skeleton"></span></td>
-              <td><span class="skeleton"></span></td>
-              <td></td>
-              <td></td>
-              <td><span class="skeleton"></span></td>
-            </tr>
-            <tr>
-              <td><span class="skeleton"></span></td>
-              <td><span class="skeleton"></span></td>
-              <td><span class="skeleton"></span></td>
-              <td></td>
-              <td></td>
-              <td><span class="skeleton"></span></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+        <section id="empty" class="empty-state" hidden>
+          <h2>No matching open loops</h2>
+          <p>
+            Add <code>open-loop: true</code> to note frontmatter, tag a note
+            <code>#open-loop</code>, or add an unchecked Markdown task.
+          </p>
+        </section>
 
-      <section id="empty" class="empty-state" hidden>
-        <h2>No matching open loops</h2>
-        <p>
-          Add <code>open-loop: true</code> to note frontmatter, tag a note
-          <code>#open-loop</code>, or add an unchecked Markdown task.
-        </p>
-      </section>
-
-      <section id="error" class="error-state" role="alert" hidden>
-        <h2>Could not scan the vault</h2>
-        <p>Check the terminal for details.</p>
-      </section>
-    </main>
+        <section id="error" class="error-state" role="alert" hidden>
+          <h2>Could not scan the vault</h2>
+          <p>Check the terminal for details.</p>
+        </section>
+      </main>
+    </open-loops>
   </body>
 </html>

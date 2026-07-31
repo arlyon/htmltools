@@ -9,6 +9,14 @@ interface StreamDescriptor {
 	$htmltoolStream: string;
 }
 
+interface McpAppBridge {
+	call(method: string, args: unknown[]): Promise<unknown>;
+}
+
+type AppWindow = Window & {
+	__htmltoolMcpAppBridge?: McpAppBridge;
+};
+
 let activeClient: object | undefined;
 
 export function createClient<Contract extends object>(): RpcClient<Contract> {
@@ -28,6 +36,14 @@ export function createClient<Contract extends object>(): RpcClient<Contract> {
 }
 
 function connect(): RemoteClient {
+	const appBridge = (window as AppWindow).__htmltoolMcpAppBridge;
+	if (appBridge) {
+		return {
+			$call: (method: string, ...args: unknown[]) =>
+				appBridge.call(method, args),
+		} as RemoteClient;
+	}
+
 	const socketUrl = new URL("/.htmltool/rpc", window.location.href);
 	socketUrl.protocol = socketUrl.protocol === "https:" ? "wss:" : "ws:";
 	const socket = new WebSocket(socketUrl);

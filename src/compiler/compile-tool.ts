@@ -1,13 +1,17 @@
 import { dirname, join, resolve } from "node:path";
 import type { BuildArtifact } from "bun";
 import ts from "typescript";
+import { compileUiDocuments, type CompiledUi } from "./compile-ui.ts";
 import { parseTool, type BlockRole, type ParsedTool } from "./parse-tool.ts";
+
+export type { CompiledUi } from "./compile-ui.ts";
 
 export interface CompiledTool {
 	parsed: ParsedTool;
 	toolDirectory: string;
 	clientBundle: BuildArtifact;
 	serverBundle: BuildArtifact;
+	ui: CompiledUi[];
 }
 
 interface VirtualEntrypoint {
@@ -19,20 +23,35 @@ interface PreparedTool {
 	parsed: ParsedTool;
 	toolDirectory: string;
 	client: VirtualEntrypoint;
+	appClient?: VirtualEntrypoint;
 	server: VirtualEntrypoint;
 }
 
 export async function compileTool(toolPath: string): Promise<CompiledTool> {
 	const prepared = await prepareTool(toolPath);
-	const [serverBundle, clientBundle] = await Promise.all([
+	const [serverBundle, clientBundle, appClientBundle] = await Promise.all([
 		bundleEntrypoint(prepared.server, "bun"),
 		bundleEntrypoint(prepared.client, "browser"),
+		prepared.appClient
+			? bundleEntrypoint(prepared.appClient, "browser", {
+					minify: true,
+					sourcemap: "none",
+				})
+			: undefined,
 	]);
+	const ui = appClientBundle
+		? await compileUiDocuments(
+				prepared.parsed,
+				prepared.toolDirectory,
+				await appClientBundle.text(),
+			)
+		: [];
 	return {
 		parsed: prepared.parsed,
 		toolDirectory: prepared.toolDirectory,
 		clientBundle,
 		serverBundle,
+		ui,
 	};
 }
 
@@ -51,6 +70,9 @@ async function prepareTool(toolPath: string): Promise<PreparedTool> {
 	const safeName = parsed.manifest.name.replace(/[^a-zA-Z0-9._-]/g, "-");
 	const commonSource = blockSource(parsed, "common");
 
+	const clientSource = [commonSource, blockSource(parsed, "client")].join(
+		"\n\n",
+	);
 	return {
 		parsed,
 		toolDirectory,
@@ -60,8 +82,19 @@ async function prepareTool(toolPath: string): Promise<PreparedTool> {
 		},
 		client: {
 			path: join(toolDirectory, `.htmltool-${safeName}.client.ts`),
-			source: [commonSource, blockSource(parsed, "client")].join("\n\n"),
+			source: clientSource,
 		},
+		appClient:
+			parsed.ui.length === 0
+				? undefined
+				: {
+						path: join(toolDirectory, `.htmltool-${safeName}.app.ts`),
+						source: [
+							'import { startMcpApp as __htmltoolStartMcpApp } from "htmltool/mcp-app";',
+							`__htmltoolStartMcpApp(${JSON.stringify({ name: parsed.manifest.name, version: "0.1.1" })});`,
+							clientSource,
+						].join("\n\n"),
+					},
 	};
 }
 
@@ -84,7 +117,8 @@ function typecheckEntrypoints(
 	const getSourceFile = host.getSourceFile.bind(host);
 	host.fileExists = (fileName) =>
 		sources.has(fileName) || ts.sys.fileExists(fileName);
-	host.readFile = (fileName) => sources.get(fileName) ?? ts.sys.readFile(fileName);
+	host.readFile = (fileName) =>
+		sources.get(fileName) ?? ts.sys.readFile(fileName);
 	host.getSourceFile = (
 		fileName,
 		languageVersion,
@@ -188,6 +222,7 @@ function formatDiagnostics(
 async function bundleEntrypoint(
 	entrypoint: VirtualEntrypoint,
 	target: "browser" | "bun",
+	options: { minify?: boolean; sourcemap?: "inline" | "none" } = {},
 ): Promise<BuildArtifact> {
 	let result: Awaited<ReturnType<typeof Bun.build>>;
 	try {
@@ -196,7 +231,8 @@ async function bundleEntrypoint(
 			files: { [entrypoint.path]: entrypoint.source },
 			target,
 			format: "esm",
-			sourcemap: "inline",
+			minify: options.minify,
+			sourcemap: options.sourcemap ?? "inline",
 		});
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);

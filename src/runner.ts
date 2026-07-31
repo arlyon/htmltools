@@ -5,8 +5,13 @@ import {
 } from "@modelcontextprotocol/server";
 import { createBirpc } from "birpc";
 import SuperJSON from "superjson";
+import { z } from "zod";
+import type { CompiledTool, CompiledUi } from "./compiler/compile-tool.ts";
+import {
+	HTMLTOOL_APP_CLOSE_METHOD,
+	HTMLTOOL_APP_RPC_TOOL,
+} from "./runtime/app-protocol.ts";
 import type { McpEntry, RpcEntry } from "./runtime/types.ts";
-import type { CompiledTool } from "./compiler/compile-tool.ts";
 
 interface SocketData {
 	receive?: (message: string) => void;
@@ -17,6 +22,17 @@ type RpcFunctions = Record<string, (...args: unknown[]) => unknown>;
 type RuntimeMethod = (...args: any[]) => any;
 type RuntimeEntry = RpcEntry<RuntimeMethod> | McpEntry<RuntimeMethod>;
 type RuntimeDefinition = Record<string, RuntimeEntry>;
+
+interface AppRpcSession {
+	functions: RpcFunctions;
+	streams: Map<string, AsyncIterator<unknown>>;
+	timeout?: ReturnType<typeof setTimeout>;
+}
+
+const MAX_APP_RPC_SESSIONS = 32;
+const APP_RPC_SESSION_IDLE_MS = 5 * 60_000;
+const APP_ID_PATTERN =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface RunningTool {
 	url: URL;
@@ -46,6 +62,7 @@ export async function runTool(
 	const mcp = await createMcpEndpoint(
 		compiled.parsed.manifest.name,
 		definition,
+		compiled.ui,
 	);
 	const server = Bun.serve<SocketData>({
 		hostname: options.hostname,
@@ -145,7 +162,7 @@ export async function runTool(
 		url: server.url,
 		stop: () => {
 			server.stop();
-			void mcp.server.close();
+			void mcp.close();
 		},
 	};
 }
@@ -153,13 +170,58 @@ export async function runTool(
 async function createMcpEndpoint(
 	name: string,
 	definition: RuntimeDefinition,
+	ui: CompiledUi[],
 ): Promise<{
-	server: McpServer;
 	transport: WebStandardStreamableHTTPServerTransport;
+	close(): Promise<void>;
 }> {
 	const server = new McpServer({ name, version: "0.1.1" });
+	for (const reservedName of [
+		HTMLTOOL_APP_RPC_TOOL,
+		HTMLTOOL_APP_CLOSE_METHOD,
+	]) {
+		if (ui.length > 0 && Object.hasOwn(definition, reservedName)) {
+			throw new Error(
+				`Server method ${JSON.stringify(reservedName)} is reserved for MCP App RPC`,
+			);
+		}
+	}
+	const uiByTool = new Map(ui.map((app) => [app.toolName, app]));
+	for (const app of ui) {
+		const entry = definition[app.toolName];
+		if (!entry) {
+			throw new Error(
+				`data-htmltool-ui references unknown server method ${JSON.stringify(app.toolName)}`,
+			);
+		}
+		if (entry.kind !== "mcp") {
+			throw new Error(
+				`data-htmltool-ui method ${JSON.stringify(app.toolName)} must use mcp(...)`,
+			);
+		}
+		server.registerResource(
+			`${app.toolName} UI`,
+			app.uri,
+			{
+				title: entry.title ?? app.toolName,
+				description: entry.description,
+				mimeType: "text/html;profile=mcp-app",
+			},
+			async (uri) => ({
+				contents: [
+					{
+						uri: uri.href,
+						mimeType: "text/html;profile=mcp-app",
+						text: app.html,
+					},
+				],
+			}),
+		);
+	}
+
 	for (const [toolName, entry] of Object.entries(definition)) {
 		if (entry.kind !== "mcp") continue;
+		const app = uiByTool.get(toolName);
 		server.registerTool(
 			toolName,
 			{
@@ -167,6 +229,7 @@ async function createMcpEndpoint(
 				description: entry.description,
 				inputSchema: entry.input,
 				outputSchema: entry.output,
+				_meta: app ? { ui: { resourceUri: app.uri } } : undefined,
 			},
 			async (input) => {
 				const parsedInput = entry.input.parse(input);
@@ -182,12 +245,128 @@ async function createMcpEndpoint(
 		);
 	}
 
+	const appSessions = new Map<string, AppRpcSession>();
+	if (ui.length > 0) registerAppRpcBridge(server, definition, appSessions);
+
 	const transport = new WebStandardStreamableHTTPServerTransport({
 		sessionIdGenerator: undefined,
 		enableJsonResponse: true,
 	});
 	await server.connect(transport);
-	return { server, transport };
+	return {
+		transport,
+		async close() {
+			await Promise.all(
+				[...appSessions.values()].map((session) => {
+					if (session.timeout) clearTimeout(session.timeout);
+					return closeStreams(session.streams);
+				}),
+			);
+			appSessions.clear();
+			await server.close();
+		},
+	};
+}
+
+function registerAppRpcBridge(
+	server: McpServer,
+	definition: RuntimeDefinition,
+	sessions: Map<string, AppRpcSession>,
+): void {
+	const input = z.object({ payload: z.string().max(1_000_000) });
+	const output = z.object({ payload: z.string() });
+	server.registerTool(
+		HTMLTOOL_APP_RPC_TOOL,
+		{
+			title: "HTMLTool RPC bridge",
+			description: "Calls this HTMLTool's server methods from its MCP App",
+			inputSchema: input,
+			outputSchema: output,
+			_meta: { ui: { visibility: ["app"] } },
+		},
+		async ({ payload }) => {
+			const request = SuperJSON.parse(payload);
+			if (
+				!isRecord(request) ||
+				typeof request.appId !== "string" ||
+				!APP_ID_PATTERN.test(request.appId) ||
+				typeof request.method !== "string" ||
+				!Array.isArray(request.args)
+			) {
+				throw new TypeError("Invalid HTMLTool RPC bridge request");
+			}
+			const response = {
+				payload: SuperJSON.stringify(
+					await callAppRpc(
+						definition,
+						sessions,
+						request.appId,
+						request.method,
+						request.args,
+					),
+				),
+			};
+			return {
+				content: [{ type: "text", text: "HTMLTool RPC call completed" }],
+				structuredContent: response,
+			};
+		},
+	);
+}
+
+async function callAppRpc(
+	definition: RuntimeDefinition,
+	sessions: Map<string, AppRpcSession>,
+	appId: string,
+	methodName: string,
+	args: unknown[],
+): Promise<unknown> {
+	if (methodName === HTMLTOOL_APP_CLOSE_METHOD) {
+		await closeAppSession(sessions, appId);
+		return undefined;
+	}
+	let session = sessions.get(appId);
+	if (!session) {
+		if (!Object.hasOwn(definition, methodName)) {
+			throw new Error(`Unknown HTMLTool RPC method: ${methodName}`);
+		}
+		if (sessions.size >= MAX_APP_RPC_SESSIONS) {
+			throw new Error("HTMLTool MCP App RPC session limit reached");
+		}
+		const streams = new Map<string, AsyncIterator<unknown>>();
+		session = { streams, functions: rpcFunctions(definition, streams) };
+		sessions.set(appId, session);
+	}
+	touchAppSession(sessions, appId, session);
+	const method = session.functions[methodName];
+	if (!Object.hasOwn(session.functions, methodName) || !method) {
+		throw new Error(`Unknown HTMLTool RPC method: ${methodName}`);
+	}
+	return method(...args);
+}
+
+async function closeAppSession(
+	sessions: Map<string, AppRpcSession>,
+	appId: string,
+): Promise<void> {
+	const session = sessions.get(appId);
+	if (!session) return;
+	sessions.delete(appId);
+	if (session.timeout) clearTimeout(session.timeout);
+	await closeStreams(session.streams);
+}
+
+function touchAppSession(
+	sessions: Map<string, AppRpcSession>,
+	appId: string,
+	session: AppRpcSession,
+): void {
+	if (session.timeout) clearTimeout(session.timeout);
+	session.timeout = setTimeout(() => {
+		if (sessions.get(appId) !== session) return;
+		sessions.delete(appId);
+		void closeStreams(session.streams);
+	}, APP_RPC_SESSION_IDLE_MS);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

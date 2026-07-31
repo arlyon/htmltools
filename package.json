@@ -12,6 +12,10 @@
       "types": "./src/runtime/client.ts",
       "import": "./src/runtime/client.ts"
     },
+    "./mcp-app": {
+      "types": "./src/runtime/mcp-app.ts",
+      "import": "./src/runtime/mcp-app.ts"
+    },
     "./server": {
       "types": "./src/runtime/server.ts",
       "import": "./src/runtime/server.ts"
@@ -20,6 +24,7 @@
   "typesVersions": {
     "*": {
       "client": ["src/runtime/client.ts"],
+      "mcp-app": ["src/runtime/mcp-app.ts"],
       "server": ["src/runtime/server.ts"]
     }
   },
@@ -32,6 +37,7 @@
   },
   "dependencies": {
     "@cfworker/json-schema": "4.1.1",
+    "@modelcontextprotocol/ext-apps": "1.7.5",
     "@modelcontextprotocol/server": "2.0.0-alpha.2",
     "birpc": "4.0.0",
     "parse5": "8.0.1",

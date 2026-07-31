@@ -93,6 +93,24 @@ Use lang="ts" to mark HTMLTool TypeScript blocks. Give each block exactly one ro
 - Server blocks may use Bun, Node APIs, the filesystem, environment variables, and installed packages.
 - Common code is compiled into both server and browser programs; keep server-only values and imports out of it.
 
+## MCP Apps
+
+Annotate a hyphenated custom element inside the document body with the name of an mcp(...) method to expose that fragment as the method's UI:
+
+~~~html
+<greeting-card data-htmltool-ui="greet">
+  <output>Waiting…</output>
+</greeting-card>
+~~~
+
+Each tool name may have one annotated custom element. HTMLTool generates a text/html;profile=mcp-app resource containing the element, bundled local assets, and the complete client bundle, then links it from the matching MCP tool. The referenced method must exist and use mcp(...). Unannotated MCP tools remain data-only.
+
+Use native customElements.define() in the client block and perform component-specific DOM work in connectedCallback(). HTMLTool waits up to five seconds for the element to be defined and connected. It buffers official MCP input/result payloads until then and dispatches them in order as bubbling htmltool:input and htmltool:result CustomEvents. Their detail is the unchanged MCP Apps notification payload.
+
+Existing createClient() calls work unchanged: every rpc() and mcp() method is available to the server's own MCP App through an MCP tool marked app-only, while the standalone browser uses WebSockets. AsyncIterable RPC retains pull-based streaming in either environment. App-only visibility is enforced by compliant hosts; HTMLTool's local HTTP/MCP endpoint has no authentication, so do not bind untrusted interfaces.
+
+Local stylesheet links, CSS @import and url() dependencies, images, fonts, and media are bundled as data URLs. Remote assets and ordinary script src attributes are rejected because MCP App resources run under host-controlled content security policies; put browser code in the htmltool client block. Bundles are limited to 256 assets, 10 MiB per asset, 25 MiB of source assets, and 40 MiB per generated app document.
+
 ## Serving and assets
 
 HTMLTool removes common and server blocks before serving the page, bundles the server and client blocks in memory, and serves relative assets from the tool directory. Keep reusable CSS in normal files and link them from the HTML.
